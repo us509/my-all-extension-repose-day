@@ -69,7 +69,7 @@ M.APP_TITLE = "Gemini Audio & Broadcast Studio"
 M.CREATOR_NAME = "Mohammed Usman"
 M.WHATSAPP_LOCAL = "03261421100"
 M.WHATSAPP_INTL = "923261421100"
-M.TARGET_CHARS_PER_PART = 2600
+M.TARGET_CHARS_PER_PART = 3900
 M.PAUSE_DURATION_MS = 380
 
 -- Single Clean Mode Selector (1 to 6 Speakers)
@@ -348,6 +348,8 @@ M.prefs = context.getSharedPreferences("Jieshuo_Gemini_ABS_V4", Context.MODE_PRI
 M.baseStorageDir = context.getFilesDir() or context.getCacheDir()
 M.previewCacheDir = File(context.getCacheDir() or M.baseStorageDir, "abs_v4_voice_previews")
 if not M.previewCacheDir.exists() then M.previewCacheDir.mkdirs() end
+M.resumeDir = File(M.baseStorageDir, "abs_v4_resume_parts")
+if not M.resumeDir.exists() then M.resumeDir.mkdirs() end
 
 -- Active User Config (5 API Keys)
 M.cfg = {
@@ -368,6 +370,7 @@ M.cfg = {
 M.isUiInitializing = true
 M.apiKeyCursor = 0
 M.cachedScriptModels = nil
+M.cachedTtsModels = nil
 
 -- ============================================================
 -- 5 API Keys Smart Rotation & Failover Helpers
@@ -552,6 +555,133 @@ function M.updateProgress(pct, msg, shouldSpeak)
     end
 end
 
+
+-- ============================================================
+-- Persistent Disk Checkpoint & Auto-Resume Engine (Survives Phone Restart)
+-- Parts are ONLY deleted on Download, Clear Text, or starting a brand-new text
+-- ============================================================
+function M.makeAudioSig(text, mode)
+    local t = M.trim(tostring(text or ""))
+    local m = tostring(mode or "")
+    local len = #t
+    local h1, h2 = 5381, 2166136261
+    local step = math.max(1, math.floor(len / 400))
+    for i = 1, len, step do
+        local b = string.byte(t, i) or 0
+        h1 = ((h1 * 33) + b) % 2147483647
+        h2 = ((h2 * 16777619) + b) % 2147483647
+    end
+    return m .. "|" .. tostring(len) .. "|" .. tostring(h1) .. "|" .. tostring(h2)
+end
+
+function M.getResumePartFile(idx)
+    if not M.resumeDir.exists() then M.resumeDir.mkdirs() end
+    return File(M.resumeDir, "part_" .. tostring(idx) .. ".pcm")
+end
+
+function M.clearAudioResume()
+    pcall(function()
+        if M.resumeDir and M.resumeDir.exists() then
+            local files = M.resumeDir.listFiles()
+            if files then
+                for i = 0, #files - 1 do
+                    pcall(function() if files[i] and files[i].exists() then files[i].delete() end end)
+                end
+            end
+        end
+    end)
+    pcall(function()
+        local ed = M.prefs.edit()
+        ed.remove("res_audio_sig")
+        ed.remove("res_audio_mode")
+        ed.remove("res_audio_total")
+        ed.commit()
+    end)
+end
+
+function M.saveAudioResumeMeta(sig, mode, totalParts)
+    pcall(function()
+        local ed = M.prefs.edit()
+        ed.putString("res_audio_sig", tostring(sig or ""))
+        ed.putString("res_audio_mode", tostring(mode or ""))
+        ed.putInt("res_audio_total", tonumber(totalParts) or 0)
+        ed.commit()
+    end)
+end
+
+function M.getAudioResumeStatus(currentText, currentMode)
+    local t = M.trim(tostring(currentText or ""))
+    if t == "" then return 0, 0, 1 end
+    local savedSig = M.prefs.getString("res_audio_sig", "")
+    local totalParts = M.prefs.getInt("res_audio_total", 0)
+    if savedSig == "" or totalParts <= 0 then return 0, 0, 1 end
+    local curSig = M.makeAudioSig(t, currentMode or M.cfg.mode)
+    if savedSig ~= curSig then return 0, 0, 1 end
+
+    local doneCount = 0
+    local firstMissing = nil
+    for i = 1, totalParts do
+        local f = M.getResumePartFile(i)
+        if f and f.exists() and f.length() > 100 then
+            doneCount = doneCount + 1
+        elseif not firstMissing then
+            firstMissing = i
+        end
+    end
+    return doneCount, totalParts, firstMissing
+end
+
+function M.clearScriptResume()
+    pcall(function()
+        local ed = M.prefs.edit()
+        ed.remove("res_script_topic")
+        ed.remove("res_script_mode")
+        ed.remove("res_script_mins")
+        ed.remove("res_script_total")
+        ed.remove("res_script_done")
+        ed.commit()
+    end)
+end
+
+function M.saveScriptResume(topic, mode, mins, totalBatches, doneBatches)
+    pcall(function()
+        local ed = M.prefs.edit()
+        ed.putString("res_script_topic", tostring(topic or ""))
+        ed.putString("res_script_mode", tostring(mode or ""))
+        ed.putInt("res_script_mins", tonumber(mins) or 1)
+        ed.putInt("res_script_total", tonumber(totalBatches) or 0)
+        ed.putInt("res_script_done", tonumber(doneBatches) or 0)
+        ed.commit()
+    end)
+end
+
+function M.getScriptResumeStatus()
+    local total = M.prefs.getInt("res_script_total", 0)
+    local done = M.prefs.getInt("res_script_done", 0)
+    local savedMode = M.prefs.getString("res_script_mode", "")
+    if total <= 0 or done <= 0 or done >= total then
+        return 0, 0, nil, nil, 0
+    end
+    if savedMode ~= "" and savedMode ~= M.cfg.mode then
+        return 0, 0, nil, nil, 0
+    end
+    if M.trim(M.cfg.userText or "") == "" then
+        return 0, 0, nil, nil, 0
+    end
+    local topic = M.prefs.getString("res_script_topic", "")
+    local mins = M.prefs.getInt("res_script_mins", M.getEffectiveMinutes())
+    return done, total, topic, savedMode, mins
+end
+
+function M.clearLastWavPrefs()
+    pcall(function()
+        local ed = M.prefs.edit()
+        ed.remove("last_wav_path")
+        ed.remove("last_wav_dur")
+        ed.commit()
+    end)
+end
+
 function M.cancelAndResetSession(speakNotice)
     S.jobId = (S.jobId or 0) + 1
     S.isGenerating = false
@@ -568,6 +698,9 @@ function M.cancelAndResetSession(speakNotice)
         S.isPlaying = false
     end
     M.deleteOldAudioFile()
+    M.clearAudioResume()
+    M.clearScriptResume()
+    M.clearLastWavPrefs()
 
     M.runOnUi(function()
         if S.ui then
@@ -666,6 +799,19 @@ function M.loadSettings()
         M.cfg.model = M.DEFAULT_MODEL
         M.saveSettings()
     end
+
+    if not S.generatedAudioPath then
+        local savedWav = M.prefs.getString("last_wav_path", "")
+        if savedWav ~= "" then
+            local wf = File(savedWav)
+            if wf.exists() and wf.length() > 100 then
+                S.generatedAudioPath = savedWav
+                S.currentDurationStr = M.prefs.getString("last_wav_dur", "")
+            else
+                M.clearLastWavPrefs()
+            end
+        end
+    end
 end
 
 function M.formatDurationText(totalSeconds)
@@ -723,9 +869,9 @@ function M.httpGet(url, cb)
     return false, errStr
 end
 
-function M.discoverWorkingScriptModels(apikey, callback)
-    if M.cachedScriptModels and #M.cachedScriptModels > 0 then
-        callback(M.cachedScriptModels, nil)
+function M.discoverAllWorkingModels(apikey, callback)
+    if M.cachedScriptModels and #M.cachedScriptModels > 0 and M.cachedTtsModels then
+        callback(M.cachedScriptModels, M.cachedTtsModels, nil)
         return
     end
     local url = "https://generativelanguage.googleapis.com/v1beta/models?key=" .. apikey
@@ -733,17 +879,19 @@ function M.discoverWorkingScriptModels(apikey, callback)
         if code ~= 200 then
             local msg = "Models list error (" .. tostring(code) .. "): " .. tostring(M.extractApiError(content) or "")
             M.logIssue("ListModels", msg)
-            callback(nil, msg)
+            callback(nil, nil, msg)
             return
         end
         local okDec, data = pcall(cjson.decode, content)
         if not okDec or not data or not data.models then
             M.logIssue("ListModels", "Invalid JSON response")
-            callback(nil, "Models list could not be parsed.")
+            callback(nil, nil, "Models list could not be parsed.")
             return
         end
 
-        local flashModels, otherGemini = {}, {}
+        local fastFlashText, otherFlashText, otherText = {}, {}, {}
+        local fastFlashTts, otherTts = {}, {}
+
         for _, m in ipairs(data.models) do
             local shortName = tostring(m.name or ""):gsub("^models/", "")
             local lower = shortName:lower()
@@ -753,38 +901,96 @@ function M.discoverWorkingScriptModels(apikey, callback)
                     if meth == "generateContent" then supportsGen = true break end
                 end
             end
-            if supportsGen and lower:find("gemini", 1, true)
-                and not lower:find("tts", 1, true) and not lower:find("image", 1, true)
-                and not lower:find("audio", 1, true) and not lower:find("embedding", 1, true)
-                and not lower:find("veo", 1, true) and not lower:find("robotics", 1, true)
-                and not lower:find("computer", 1, true) then
-                if lower:find("flash", 1, true) then
-                    table.insert(flashModels, shortName)
-                else
-                    table.insert(otherGemini, shortName)
+
+            if supportsGen and lower:find("gemini", 1, true) then
+                if lower:find("tts", 1, true) then
+                    if lower:find("flash", 1, true) then
+                        table.insert(fastFlashTts, shortName)
+                    else
+                        table.insert(otherTts, shortName)
+                    end
+                elseif not lower:find("image", 1, true)
+                    and not lower:find("audio", 1, true)
+                    and not lower:find("embedding", 1, true)
+                    and not lower:find("veo", 1, true)
+                    and not lower:find("robotics", 1, true)
+                    and not lower:find("computer", 1, true) then
+                    if lower:find("flash-lite", 1, true) then
+                        table.insert(fastFlashText, shortName)
+                    elseif lower:find("flash", 1, true) then
+                        table.insert(otherFlashText, shortName)
+                    else
+                        table.insert(otherText, shortName)
+                    end
                 end
             end
         end
 
-        table.sort(flashModels, function(a, b) return a > b end)
-        table.sort(otherGemini, function(a, b) return a > b end)
+        table.sort(fastFlashText, function(a, b) return a > b end)
+        table.sort(otherFlashText, function(a, b) return a > b end)
+        table.sort(otherText, function(a, b) return a > b end)
+        table.sort(fastFlashTts, function(a, b) return a > b end)
+        table.sort(otherTts, function(a, b) return a > b end)
 
-        local finalList = {}
-        for _, v in ipairs(flashModels) do table.insert(finalList, v) end
-        for _, v in ipairs(otherGemini) do table.insert(finalList, v) end
+        -- Fastest Flash text models first for fast script writing
+        local scriptList = {}
+        for _, v in ipairs(otherFlashText) do table.insert(scriptList, v) end
+        for _, v in ipairs(fastFlashText) do table.insert(scriptList, v) end
+        for _, v in ipairs(otherText) do table.insert(scriptList, v) end
 
-        if #finalList == 0 then
-            M.logIssue("ListModels", "No text generation models available")
-            callback(nil, "No active text model found for this API Key.")
-        else
-            M.cachedScriptModels = finalList
-            callback(finalList, nil)
-        end
+        -- Fastest Flash TTS models first, followed by Pro / other active TTS models
+        local ttsList = {}
+        for _, v in ipairs(fastFlashTts) do table.insert(ttsList, v) end
+        for _, v in ipairs(otherTts) do table.insert(ttsList, v) end
+
+        M.cachedScriptModels = scriptList
+        M.cachedTtsModels = ttsList
+        callback(scriptList, ttsList, nil)
     end)
     if not okGet then
         M.logIssue("ListModels", tostring(errGet))
-        callback(nil, "Models check failed: " .. tostring(errGet))
+        callback(nil, nil, "Models check failed: " .. tostring(errGet))
     end
+end
+
+function M.discoverWorkingScriptModels(apikey, callback)
+    M.discoverAllWorkingModels(apikey, function(scriptList, _, err)
+        if err then
+            callback(nil, err)
+        elseif not scriptList or #scriptList == 0 then
+            M.logIssue("ListModels", "No text generation models available")
+            callback(nil, "No active text model found for this API Key.")
+        else
+            callback(scriptList, nil)
+        end
+    end)
+end
+
+function M.discoverWorkingTtsModels(apikey, primaryModel, callback)
+    local function buildQueue(discoveredTts)
+        local queue, seen = {}, {}
+        local function addM(m)
+            if m and m ~= "" and not seen[m] then
+                seen[m] = true
+                table.insert(queue, m)
+            end
+        end
+        addM(primaryModel)
+        if discoveredTts then
+            for _, m in ipairs(discoveredTts) do addM(m) end
+        end
+        for _, m in ipairs(M.MODEL_LIST) do addM(m) end
+        return queue
+    end
+
+    if M.cachedTtsModels and #M.cachedTtsModels > 0 then
+        callback(buildQueue(M.cachedTtsModels))
+        return
+    end
+
+    M.discoverAllWorkingModels(apikey, function(_, ttsList, _)
+        callback(buildQueue(ttsList))
+    end)
 end
 
 -- ============================================================
@@ -1036,8 +1242,14 @@ function M.refreshActionButtons()
                 M.setBtnColor(S.ui.createScriptBtn, "#9E9E9E")
             else
                 S.ui.createScriptBtn.setEnabled(true)
-                S.ui.createScriptBtn.setText("CREATE SCRIPT")
-                M.setBtnColor(S.ui.createScriptBtn, "#6A1B9A")
+                local doneS, totalS = M.getScriptResumeStatus()
+                if doneS > 0 and doneS < totalS then
+                    S.ui.createScriptBtn.setText("RESUME SCRIPT (" .. tostring(doneS) .. "/" .. tostring(totalS) .. ")")
+                    M.setBtnColor(S.ui.createScriptBtn, "#8E24AA")
+                else
+                    S.ui.createScriptBtn.setText("CREATE SCRIPT")
+                    M.setBtnColor(S.ui.createScriptBtn, "#6A1B9A")
+                end
             end
         end
 
@@ -1052,8 +1264,14 @@ function M.refreshActionButtons()
                 M.setBtnColor(S.ui.generateBtn, "#9E9E9E")
             else
                 S.ui.generateBtn.setEnabled(true)
-                S.ui.generateBtn.setText("GENERATE AUDIO")
-                M.setBtnColor(S.ui.generateBtn, "#2196F3")
+                local doneA, totalA = M.getAudioResumeStatus(M.cfg.userText, M.cfg.mode)
+                if doneA > 0 and doneA < totalA then
+                    S.ui.generateBtn.setText("RESUME AUDIO (" .. tostring(doneA) .. "/" .. tostring(totalA) .. ")")
+                    M.setBtnColor(S.ui.generateBtn, "#00897B")
+                else
+                    S.ui.generateBtn.setText("GENERATE AUDIO")
+                    M.setBtnColor(S.ui.generateBtn, "#2196F3")
+                end
             end
         end
     end)
@@ -1136,14 +1354,14 @@ function M.mergePcmFilesToWav(partFilesList, pauseMs, filePrefix)
         local fos = FileOutputStream(File(finalPath))
         M.writeWavHeader(fos, totalPcmBytes)
 
-        local copyBuf = byte[8192]
+        local copyBuf = byte[32768]
         local silenceBuf = (pauseBytes > 0) and byte[pauseBytes] or nil
 
         for idx, item in ipairs(validItems) do
             local fis = FileInputStream(item.file)
             local rem = item.length
             while rem > 0 do
-                local r = fis.read(copyBuf, 0, math.min(8192, rem))
+                local r = fis.read(copyBuf, 0, math.min(32768, rem))
                 if not r or r <= 0 then break end
                 fos.write(copyBuf, 0, r)
                 rem = rem - r
@@ -1159,8 +1377,6 @@ function M.mergePcmFilesToWav(partFilesList, pauseMs, filePrefix)
         S.generatedAudioPath = finalPath
     end)
 
-    cleanupTempFiles(partFilesList)
-
     if not okMerge or not S.generatedAudioPath then
         M.logIssue("MergeWAV", tostring(errMerge))
         return false, tostring(errMerge)
@@ -1172,6 +1388,12 @@ function M.onAudioReadyUI(totalDurationSec, labelPrefix)
     local shortDur = M.formatDurationText(totalDurationSec)
     S.currentDurationStr = shortDur
     S.isGenerating = false
+    pcall(function()
+        local ed = M.prefs.edit()
+        ed.putString("last_wav_path", tostring(S.generatedAudioPath or ""))
+        ed.putString("last_wav_dur", tostring(shortDur or ""))
+        ed.commit()
+    end)
     M.updateProgress(100, labelPrefix .. " Ready (" .. shortDur .. ")", true)
 
     M.runOnUi(function()
@@ -1270,19 +1492,20 @@ function M.parseBcTurnsIntoChunks(scriptText)
 
     local chunks, cur, chars = {}, {}, 0
     for _, t in ipairs(allTurns) do
-        table.insert(cur, t)
-        chars = chars + #t.text
-        if #cur >= 16 or chars >= 2100 then
+        local tChars = M.utf8CharCount(t.text)
+        if #cur > 0 and (#cur >= 80 or (chars + tChars) > 4000) then
             table.insert(chunks, cur)
             cur, chars = {}, 0
         end
+        table.insert(cur, t)
+        chars = chars + tChars
     end
     if #cur > 0 then table.insert(chunks, cur) end
     return chunks
 end
 
-function M.parseGroupSpeakerTurns(scriptText, speakerCount)
-    local turns = {}
+function M.parseGroupSpeakerBatches(scriptText, speakerCount)
+    local allTurns = {}
     local lastIdx = 1
     for line in scriptText:gmatch("[^\n]+") do
         local spk, body, idx = M.extractSpeakerAndBody(line, speakerCount)
@@ -1290,14 +1513,42 @@ function M.parseGroupSpeakerTurns(scriptText, speakerCount)
             idx = idx or lastIdx
             if idx > speakerCount then idx = 1 end
             lastIdx = idx
-            if #turns > 0 and turns[#turns].speakerIdx == idx and (#turns[#turns].text + #body) < 1700 then
-                turns[#turns].text = turns[#turns].text .. " " .. body
+            if #allTurns > 0 and allTurns[#allTurns].speakerIdx == idx
+                and (M.utf8CharCount(allTurns[#allTurns].text) + M.utf8CharCount(body)) < 3800 then
+                allTurns[#allTurns].text = allTurns[#allTurns].text .. " " .. body
             else
-                table.insert(turns, { speakerIdx = idx, text = body })
+                table.insert(allTurns, { speakerIdx = idx, text = body })
             end
         end
     end
-    return turns
+
+    local batches = {}
+    local curTurns, curSpkList, curSpkSet, curChars = {}, {}, {}, 0
+
+    for _, t in ipairs(allTurns) do
+        local tChars = M.utf8CharCount(t.text)
+        local alreadyIn = curSpkSet[t.speakerIdx] == true
+        local wouldExceedSpeakers = (not alreadyIn) and (#curSpkList >= 2)
+        local wouldExceedSize = (#curTurns > 0) and (#curTurns >= 80 or (curChars + tChars) > 4000)
+
+        if wouldExceedSpeakers or wouldExceedSize then
+            table.insert(batches, { speakers = curSpkList, turns = curTurns })
+            curTurns, curSpkList, curSpkSet, curChars = {}, {}, {}, 0
+            alreadyIn = false
+        end
+
+        if not alreadyIn then
+            curSpkSet[t.speakerIdx] = true
+            table.insert(curSpkList, t.speakerIdx)
+        end
+        table.insert(curTurns, t)
+        curChars = curChars + tChars
+    end
+
+    if #curTurns > 0 then
+        table.insert(batches, { speakers = curSpkList, turns = curTurns })
+    end
+    return batches
 end
 
 function M.normalizeSingleChunk(chunk)
@@ -1363,7 +1614,7 @@ function M.splitSingleTextIntoChunks(text)
     if t == "" then return {} end
 
     local totalChars = M.utf8CharCount(t)
-    if totalChars <= 2800 then
+    if totalChars <= 4000 then
         return { M.normalizeSingleChunk(t) }
     end
 
@@ -1418,7 +1669,13 @@ function M.startCreateScriptJob(inputText)
         if isCanceled() then return end
         S.isWritingScript = false
         M.logIssue("CreateScript", msg)
-        M.updateProgress(0, msg, true)
+        local dS, tS = M.getScriptResumeStatus()
+        if dS > 0 and dS < tS then
+            local savedPct = math.max(10, math.floor((dS / tS) * 85) + 10)
+            M.updateProgress(savedPct, msg .. " (" .. tostring(dS) .. "/" .. tostring(tS) .. " parts safely saved. Tap RESUME SCRIPT.)", true)
+        else
+            M.updateProgress(0, msg, true)
+        end
         M.refreshActionButtons()
     end
 
@@ -1445,6 +1702,13 @@ function M.startCreateScriptJob(inputText)
         speakerRosterStr = table.concat(rList, ", ")
     end
 
+    local resDone, resTotal, resTopic, _, resMins = M.getScriptResumeStatus()
+    local isResumingScript = (resDone > 0 and resDone < resTotal)
+    local effectiveTopic = isResumingScript and (resTopic or inputText) or inputText
+    if isResumingScript and resMins and resMins > 0 then
+        totalMins = resMins
+    end
+
     local batches = {}
     local remMins = totalMins
     while remMins > 0 do
@@ -1454,9 +1718,21 @@ function M.startCreateScriptJob(inputText)
     end
 
     local totalBatches = #batches
+    local startBatchIdx = 1
     local accumulatedScript = ""
 
-    M.updateProgress(5, "Preparing fast script engine...", true)
+    if isResumingScript and resTotal == totalBatches then
+        accumulatedScript = M.cfg.userText or ""
+        startBatchIdx = resDone + 1
+        M.updateProgress(math.max(10, math.floor((resDone / totalBatches) * 85) + 10),
+            "Resuming script from part " .. tostring(startBatchIdx) .. "/" .. tostring(totalBatches) .. "...", true)
+    else
+        M.clearScriptResume()
+        if totalBatches > 1 then
+            M.saveScriptResume(effectiveTopic, M.cfg.mode, totalMins, totalBatches, 0)
+        end
+        M.updateProgress(5, "Preparing fast script engine...", true)
+    end
 
     M.discoverWorkingScriptModels(primaryKey, function(models, discErr)
         if isCanceled() then return end
@@ -1490,7 +1766,11 @@ function M.startCreateScriptJob(inputText)
                 else
                     table.insert(lines, "3. IMPORTANT: No custom names were given. Do NOT invent random personal names; keep the friendly conversation completely natural without forcing names.")
                 end
-                table.insert(lines, "4. Mix the speaking order naturally like real friends sitting together (NEVER follow a rigid 1-2-3-4-5-6 loop; let speakers jump in, reply, and interact organically).")
+                if spkCount >= 3 then
+                    table.insert(lines, "4. Structure the group conversation in longer, natural 2-speaker back-and-forth exchanges/scenes (let 2 speakers talk together for 10 to 14 turns before smoothly bringing in the next speaker so everyone participates naturally with minimal scene switches).")
+                else
+                    table.insert(lines, "4. Keep the 2-speaker conversation lively, natural, and engaging with smooth back-and-forth replies.")
+                end
                 table.insert(lines, "5. No brackets [], parentheses (), asterisks *, emojis, or stage directions. Output ONLY the clean dialogue lines.")
             end
 
@@ -1534,7 +1814,7 @@ function M.startCreateScriptJob(inputText)
                 if isCanceled() then return end
 
                 if code == 400 and useFastThinking then
-                    M.delay(300, function() runBatch(bIdx, modelIdx, curKey, false, keyRetries) end)
+                    M.delay(100, function() runBatch(bIdx, modelIdx, curKey, false, keyRetries) end)
                     return
                 end
 
@@ -1543,12 +1823,12 @@ function M.startCreateScriptJob(inputText)
                     local altKey = M.getAlternateApiKey(curKey)
                     if altKey and keyRetries < 4 then
                         M.updateProgress(basePct, "Key busy (code " .. tostring(code) .. "), switching API key...", false)
-                        M.delay(800, function() runBatch(bIdx, modelIdx, altKey, useFastThinking, keyRetries + 1) end)
+                        M.delay(250, function() runBatch(bIdx, modelIdx, altKey, useFastThinking, keyRetries + 1) end)
                         return
                     end
                     if modelIdx < #models then
                         M.updateProgress(basePct, "Model busy (code " .. tostring(code) .. "), switching model...", false)
-                        M.delay(1000, function() runBatch(bIdx, modelIdx + 1, curKey, true, 0) end)
+                        M.delay(300, function() runBatch(bIdx, modelIdx + 1, curKey, true, 0) end)
                         return
                     end
                 end
@@ -1594,12 +1874,14 @@ function M.startCreateScriptJob(inputText)
                     end)
 
                     if bIdx < totalBatches then
+                        M.saveScriptResume(effectiveTopic, M.cfg.mode, totalMins, totalBatches, bIdx)
                         local donePct = math.max(10, math.floor((bIdx / totalBatches) * 85) + 10)
-                        M.updateProgress(donePct, "Script part " .. tostring(bIdx) .. "/" .. tostring(totalBatches) .. " done. Continuing...", false)
-                        M.delay(1000, function()
-                            runBatch(bIdx + 1, modelIdx, M.getNextApiKey(), true, 0)
+                        M.updateProgress(donePct, "Script part " .. tostring(bIdx) .. "/" .. tostring(totalBatches) .. " saved. Continuing...", false)
+                        M.delay(100, function()
+                            runBatch(bIdx + 1, modelIdx, M.getNextApiKey(), useFastThinking, 0)
                         end)
                     else
+                        M.clearScriptResume()
                         S.isWritingScript = false
                         M.updateProgress(100, "Script Ready! Review it and tap GENERATE AUDIO.", true)
                         M.refreshActionButtons()
@@ -1612,7 +1894,7 @@ function M.startCreateScriptJob(inputText)
             if not okS then failScript("Script request failed: " .. tostring(errS)) end
         end
 
-        runBatch(1, 1, primaryKey, true, 0)
+        runBatch(startBatchIdx, 1, primaryKey, true, 0)
     end)
 end
 
@@ -1640,17 +1922,21 @@ function M.startSingleSpeakerAudioJob(inputText)
         if m ~= primaryModel then table.insert(ttsQueue, m) end
     end
 
-    local tempFiles = {}
     local function isCanceled()
         return S.jobId ~= myJobId
     end
 
     local function stopOnError(msg)
-        cleanupTempFiles(tempFiles)
         if isCanceled() then return end
         S.isGenerating = false
         M.logIssue("SingleAudio", msg)
-        M.updateProgress(0, msg, true)
+        local dA, tA = M.getAudioResumeStatus(inputText, M.cfg.mode)
+        if dA > 0 and dA < tA then
+            local savedPct = math.max(5, math.floor((dA / tA) * 90))
+            M.updateProgress(savedPct, msg .. " (" .. tostring(dA) .. "/" .. tostring(tA) .. " parts safely saved. Tap RESUME AUDIO.)", true)
+        else
+            M.updateProgress(0, msg, true)
+        end
         M.refreshActionButtons()
     end
 
@@ -1669,10 +1955,23 @@ function M.startSingleSpeakerAudioJob(inputText)
 
     local baseStyle = M.SINGLE_STYLE_TEXT[style] or M.SINGLE_STYLE_TEXT["Default / Normal"]
 
+    local audioSig = M.makeAudioSig(inputText, M.cfg.mode)
+    local doneA, savedTotalA, firstMissingA = M.getAudioResumeStatus(inputText, M.cfg.mode)
+    local startIdx = 1
+    if savedTotalA == totalParts and doneA > 0 then
+        startIdx = firstMissingA or (totalParts + 1)
+    else
+        M.clearAudioResume()
+        M.saveAudioResumeMeta(audioSig, M.cfg.mode, totalParts)
+        startIdx = 1
+    end
+
     local function finishMerge()
-        if isCanceled() then cleanupTempFiles(tempFiles) return end
+        if isCanceled() then return end
+        local allFiles = {}
+        for i = 1, totalParts do table.insert(allFiles, M.getResumePartFile(i)) end
         M.updateProgress(95, "Merging all " .. tostring(totalParts) .. " audio parts...", false)
-        local okM, durOrErr = M.mergePcmFilesToWav(tempFiles, M.PAUSE_DURATION_MS, "gemini_single")
+        local okM, durOrErr = M.mergePcmFilesToWav(allFiles, M.PAUSE_DURATION_MS, "gemini_single")
         if isCanceled() then M.deleteOldAudioFile() return end
         if not okM then
             stopOnError("Merge error: " .. tostring(durOrErr))
@@ -1682,7 +1981,7 @@ function M.startSingleSpeakerAudioJob(inputText)
     end
 
     local function processChunk(partIdx, ttsIdx, modeIdx, curKey, keyRetries)
-        if isCanceled() then cleanupTempFiles(tempFiles) return end
+        if isCanceled() then return end
         local curModel = ttsQueue[ttsIdx]
         if not curModel then
             stopOnError("Failed at Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. ". Check Report Issue.")
@@ -1733,10 +2032,10 @@ function M.startSingleSpeakerAudioJob(inputText)
         }
 
         local okP, errP = M.httpPost(url, cjson.encode(payload), headers, function(code, content)
-            if isCanceled() then cleanupTempFiles(tempFiles) return end
+            if isCanceled() then return end
 
             if code == 400 and modeIdx < 4 then
-                M.delay(400, function() processChunk(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
+                M.delay(100, function() processChunk(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
                 return
             end
 
@@ -1744,10 +2043,10 @@ function M.startSingleSpeakerAudioJob(inputText)
                 M.logIssue("SinglePart" .. tostring(partIdx), "Model " .. curModel .. " HTTP " .. tostring(code) .. ": " .. tostring(M.extractApiError(content) or "Busy"))
                 local altKey = M.getAlternateApiKey(curKey)
                 if altKey and keyRetries < 4 then
-                    M.delay(900, function() processChunk(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
+                    M.delay(250, function() processChunk(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
                     return
                 elseif ttsIdx < #ttsQueue then
-                    M.delay(1200, function() processChunk(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
+                    M.delay(300, function() processChunk(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
                     return
                 end
             end
@@ -1759,19 +2058,18 @@ function M.startSingleSpeakerAudioJob(inputText)
                     return
                 end
 
-                local pf = File(M.baseStorageDir, "tmp_s_" .. tostring(myJobId) .. "_" .. tostring(partIdx) .. ".pcm")
+                local pf = M.getResumePartFile(partIdx)
                 local okSave, errSave = writePcmArraysToFile(pf, byteArrays)
                 if not okSave then
                     stopOnError("Part " .. tostring(partIdx) .. " save error: " .. tostring(errSave))
                     return
                 end
-                table.insert(tempFiles, pf)
 
                 local donePct = math.max(5, math.floor((partIdx / totalParts) * 90))
                 M.updateProgress(donePct, "Audio Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " done", false)
 
                 if partIdx < totalParts then
-                    M.delay(900, function() processChunk(partIdx + 1, 1, 1, M.getNextApiKey(), 0) end)
+                    M.delay(50, function() processChunk(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0) end)
                 else
                     finishMerge()
                 end
@@ -1782,7 +2080,24 @@ function M.startSingleSpeakerAudioJob(inputText)
         if not okP then stopOnError("Request failed: " .. tostring(errP)) end
     end
 
-    processChunk(1, 1, 1, M.getNextApiKey(), 0)
+    if startIdx > totalParts then
+        finishMerge()
+        return
+    end
+    local firstKey = M.getNextApiKey()
+    if startIdx > 1 then
+        M.updateProgress(math.max(5, math.floor(((startIdx - 1) / totalParts) * 90)),
+            "Resuming from Part " .. tostring(startIdx) .. "/" .. tostring(totalParts) .. " (" .. tostring(startIdx - 1) .. " saved)...", true)
+    else
+        M.updateProgress(5, "Checking active audio models...", false)
+    end
+    M.discoverWorkingTtsModels(firstKey, primaryModel, function(discoveredQueue)
+        if isCanceled() then return end
+        if discoveredQueue and #discoveredQueue > 0 then
+            ttsQueue = discoveredQueue
+        end
+        processChunk(startIdx, 1, 1, firstKey, 0)
+    end)
 end
 
 -- ============================================================
@@ -1810,17 +2125,21 @@ function M.startBroadcastAudioJob(inputText)
         if m ~= primaryModel then table.insert(ttsQueue, m) end
     end
 
-    local tempFiles = {}
     local function isCanceled()
         return S.jobId ~= myJobId
     end
 
     local function stopOnError(msg)
-        cleanupTempFiles(tempFiles)
         if isCanceled() then return end
         S.isGenerating = false
         M.logIssue("BroadcastAudio", msg)
-        M.updateProgress(0, msg, true)
+        local dA, tA = M.getAudioResumeStatus(inputText, M.cfg.mode)
+        if dA > 0 and dA < tA then
+            local savedPct = math.max(5, math.floor((dA / tA) * 90))
+            M.updateProgress(savedPct, msg .. " (" .. tostring(dA) .. "/" .. tostring(tA) .. " parts safely saved. Tap RESUME AUDIO.)", true)
+        else
+            M.updateProgress(0, msg, true)
+        end
         M.refreshActionButtons()
     end
 
@@ -1847,10 +2166,23 @@ function M.startBroadcastAudioJob(inputText)
         local v1 = M.cfg.speakerVoices[1] or M.DEFAULT_SPK_VOICES[1]
         local v2 = M.cfg.speakerVoices[2] or M.DEFAULT_SPK_VOICES[2]
 
+        local audioSig = M.makeAudioSig(inputText, M.cfg.mode)
+        local doneA, savedTotalA, firstMissingA = M.getAudioResumeStatus(inputText, M.cfg.mode)
+        local startIdx = 1
+        if savedTotalA == totalParts and doneA > 0 then
+            startIdx = firstMissingA or (totalParts + 1)
+        else
+            M.clearAudioResume()
+            M.saveAudioResumeMeta(audioSig, M.cfg.mode, totalParts)
+            startIdx = 1
+        end
+
         local function finishMerge()
-            if isCanceled() then cleanupTempFiles(tempFiles) return end
+            if isCanceled() then return end
+            local allFiles = {}
+            for i = 1, totalParts do table.insert(allFiles, M.getResumePartFile(i)) end
             M.updateProgress(95, "Merging all " .. tostring(totalParts) .. " broadcast parts...", false)
-            local okM, durOrErr = M.mergePcmFilesToWav(tempFiles, 280, "gemini_broadcast")
+            local okM, durOrErr = M.mergePcmFilesToWav(allFiles, 280, "gemini_broadcast")
             if isCanceled() then M.deleteOldAudioFile() return end
             if not okM then
                 stopOnError("Merge error: " .. tostring(durOrErr))
@@ -1860,7 +2192,7 @@ function M.startBroadcastAudioJob(inputText)
         end
 
         local function processBcPart(partIdx, ttsIdx, modeIdx, curKey, keyRetries)
-            if isCanceled() then cleanupTempFiles(tempFiles) return end
+            if isCanceled() then return end
             local curModel = ttsQueue[ttsIdx]
             if not curModel then
                 stopOnError("Failed at Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. ". Check Report Issue.")
@@ -1920,10 +2252,10 @@ function M.startBroadcastAudioJob(inputText)
             }
 
             local okP, errP = M.httpPost(url, cjson.encode(payload), headers, function(code, content)
-                if isCanceled() then cleanupTempFiles(tempFiles) return end
+                if isCanceled() then return end
 
                 if code == 400 and modeIdx < 4 then
-                    M.delay(400, function() processBcPart(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
+                    M.delay(100, function() processBcPart(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
                     return
                 end
 
@@ -1931,10 +2263,10 @@ function M.startBroadcastAudioJob(inputText)
                     M.logIssue("Bc2Part" .. tostring(partIdx), "Model " .. curModel .. " HTTP " .. tostring(code) .. ": " .. tostring(M.extractApiError(content) or "Busy"))
                     local altKey = M.getAlternateApiKey(curKey)
                     if altKey and keyRetries < 4 then
-                        M.delay(900, function() processBcPart(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
+                        M.delay(250, function() processBcPart(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
                         return
                     elseif ttsIdx < #ttsQueue then
-                        M.delay(1200, function() processBcPart(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
+                        M.delay(300, function() processBcPart(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
                         return
                     end
                 end
@@ -1946,19 +2278,18 @@ function M.startBroadcastAudioJob(inputText)
                         return
                     end
 
-                    local pf = File(M.baseStorageDir, "tmp_bc_" .. tostring(myJobId) .. "_" .. tostring(partIdx) .. ".pcm")
+                    local pf = M.getResumePartFile(partIdx)
                     local okSave, errSave = writePcmArraysToFile(pf, byteArrays)
                     if not okSave then
                         stopOnError("Part " .. tostring(partIdx) .. " save error: " .. tostring(errSave))
                         return
                     end
-                    table.insert(tempFiles, pf)
 
                     local donePct = math.max(5, math.floor((partIdx / totalParts) * 90))
                     M.updateProgress(donePct, "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " done", false)
 
                     if partIdx < totalParts then
-                        M.delay(900, function() processBcPart(partIdx + 1, 1, 1, M.getNextApiKey(), 0) end)
+                        M.delay(50, function() processBcPart(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0) end)
                     else
                         finishMerge()
                     end
@@ -1969,22 +2300,52 @@ function M.startBroadcastAudioJob(inputText)
             if not okP then stopOnError("Request failed: " .. tostring(errP)) end
         end
 
-        processBcPart(1, 1, 1, M.getNextApiKey(), 0)
+        if startIdx > totalParts then
+            finishMerge()
+            return
+        end
+        local firstKey = M.getNextApiKey()
+        if startIdx > 1 then
+            M.updateProgress(math.max(5, math.floor(((startIdx - 1) / totalParts) * 90)),
+                "Resuming broadcast from Part " .. tostring(startIdx) .. "/" .. tostring(totalParts) .. " (" .. tostring(startIdx - 1) .. " saved)...", true)
+        else
+            M.updateProgress(5, "Checking active audio models...", false)
+        end
+        M.discoverWorkingTtsModels(firstKey, primaryModel, function(discoveredQueue)
+            if isCanceled() then return end
+            if discoveredQueue and #discoveredQueue > 0 then
+                ttsQueue = discoveredQueue
+            end
+            processBcPart(startIdx, 1, 1, firstKey, 0)
+        end)
         return
     end
 
-    -- PATH B: 3-to-6 Speakers Zero Voice-Mix Group Engine
-    local turns = M.parseGroupSpeakerTurns(cleanScript, spkCount)
-    local totalParts = #turns
+    -- PATH B: 3-to-6 Speakers Smart 2-Speaker Pair Batching Engine (4000 True Chars)
+    local batches = M.parseGroupSpeakerBatches(cleanScript, spkCount)
+    local totalParts = #batches
     if totalParts == 0 then
         stopOnError("Group script format not found. Tap CREATE SCRIPT first.")
         return
     end
 
+    local audioSig = M.makeAudioSig(inputText, M.cfg.mode)
+    local doneA, savedTotalA, firstMissingA = M.getAudioResumeStatus(inputText, M.cfg.mode)
+    local startIdx = 1
+    if savedTotalA == totalParts and doneA > 0 then
+        startIdx = firstMissingA or (totalParts + 1)
+    else
+        M.clearAudioResume()
+        M.saveAudioResumeMeta(audioSig, M.cfg.mode, totalParts)
+        startIdx = 1
+    end
+
     local function finishGroupMerge()
-        if isCanceled() then cleanupTempFiles(tempFiles) return end
-        M.updateProgress(95, "Merging all " .. tostring(totalParts) .. " group dialogues...", false)
-        local okM, durOrErr = M.mergePcmFilesToWav(tempFiles, 220, "gemini_group_" .. tostring(spkCount) .. "spk")
+        if isCanceled() then return end
+        local allFiles = {}
+        for i = 1, totalParts do table.insert(allFiles, M.getResumePartFile(i)) end
+        M.updateProgress(95, "Merging all " .. tostring(totalParts) .. " group broadcast parts...", false)
+        local okM, durOrErr = M.mergePcmFilesToWav(allFiles, 240, "gemini_group_" .. tostring(spkCount) .. "spk")
         if isCanceled() then M.deleteOldAudioFile() return end
         if not okM then
             stopOnError("Merge error: " .. tostring(durOrErr))
@@ -1993,59 +2354,108 @@ function M.startBroadcastAudioJob(inputText)
         M.onAudioReadyUI(durOrErr, tostring(spkCount) .. "-Speaker Broadcast")
     end
 
-    local function processTurn(partIdx, ttsIdx, modeIdx, curKey, keyRetries)
-        if isCanceled() then cleanupTempFiles(tempFiles) return end
+    local function processBatch(partIdx, ttsIdx, modeIdx, curKey, keyRetries)
+        if isCanceled() then return end
         local curModel = ttsQueue[ttsIdx]
         if not curModel then
             stopOnError("Failed at Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. ". Check Report Issue.")
             return
         end
 
-        local turn = turns[partIdx]
-        local spkIdx = turn.speakerIdx
-        local voice = M.cfg.speakerVoices[spkIdx] or M.DEFAULT_SPK_VOICES[spkIdx] or "Puck"
+        local batch = batches[partIdx]
+        local spkList = batch.speakers
+        local isMulti = (#spkList >= 2)
 
         local pct = math.max(5, math.floor(((partIdx - 1) / totalParts) * 90))
-        M.updateProgress(pct, "Dialogue Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating...", partIdx == 1 and modeIdx == 1 and keyRetries == 0)
+        M.updateProgress(pct, "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating...", partIdx == 1 and modeIdx == 1 and keyRetries == 0)
 
         local contNote = ""
-        if partIdx > 1 and turns[partIdx - 1] then
-            contNote = ", responding naturally right after '" .. string.sub(turns[partIdx - 1].text or "", -160) .. "' with consistent pitch and tempo"
+        if partIdx > 1 and batches[partIdx - 1] and #batches[partIdx - 1].turns > 0 then
+            local prevBatchTurns = batches[partIdx - 1].turns
+            local lastTurn = prevBatchTurns[#prevBatchTurns]
+            contNote = ", continuing naturally right after '" .. string.sub(lastTurn.text or "", -160) .. "' with consistent pitch and tempo"
         end
-
-        local stylePrompt = "natural group podcast friend (" .. voice .. ") speaking in " .. lang
-            .. ", strictly matching exact mood: " .. mood .. ", keeping identical voice identity, vocal pitch, and lively tone throughout" .. contNote
 
         local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. curModel .. ":generateContent?key=" .. curKey
-        local partObj = { text = turn.text }
-        if modeIdx == 3 then
-            partObj.speechMetadata = { style = stylePrompt }
+        local partsArray = {}
+        local genCfg
+
+        if isMulti then
+            local idxA, idxB = spkList[1], spkList[2]
+            local labelA, labelB = "Speaker" .. tostring(idxA), "Speaker" .. tostring(idxB)
+            local voiceA = M.cfg.speakerVoices[idxA] or M.DEFAULT_SPK_VOICES[idxA] or "Puck"
+            local voiceB = M.cfg.speakerVoices[idxB] or M.DEFAULT_SPK_VOICES[idxB] or "Kore"
+
+            local styleA = "consistent broadcast friend (" .. voiceA .. ") speaking in " .. lang
+                .. ", strictly matching exact mood: " .. mood .. ", locked to identical voice identity, vocal pitch, and steady tempo" .. contNote
+            local styleB = "consistent broadcast friend (" .. voiceB .. ") speaking in " .. lang
+                .. ", strictly matching exact mood: " .. mood .. ", locked to identical voice identity, vocal pitch, and steady tempo" .. contNote
+
+            for _, turn in ipairs(batch.turns) do
+                local lbl = "Speaker" .. tostring(turn.speakerIdx)
+                local st = (turn.speakerIdx == idxA) and styleA or styleB
+                if modeIdx <= 2 then
+                    table.insert(partsArray, { text = turn.text, speech_metadata = { speaker = lbl, style = st } })
+                elseif modeIdx == 3 then
+                    table.insert(partsArray, { text = turn.text, speech_metadata = { speaker = lbl } })
+                else
+                    table.insert(partsArray, { text = turn.text, speechMetadata = { speaker = lbl } })
+                end
+            end
+
+            local spkCfgs = (modeIdx <= 3) and {
+                { speaker = labelA, voiceConfig = { voice = voiceA } },
+                { speaker = labelB, voiceConfig = { voice = voiceB } }
+            } or {
+                { speaker = labelA, voiceConfig = { prebuiltVoiceConfig = { voiceName = voiceA } } },
+                { speaker = labelB, voiceConfig = { prebuiltVoiceConfig = { voiceName = voiceB } } }
+            }
+
+            genCfg = {
+                responseModalities = { "AUDIO" },
+                speechConfig = { multiSpeakerVoiceConfig = { speakerVoiceConfigs = spkCfgs } }
+            }
         else
-            partObj.speech_metadata = { style = stylePrompt }
+            local idxA = spkList[1]
+            local voiceA = M.cfg.speakerVoices[idxA] or M.DEFAULT_SPK_VOICES[idxA] or "Puck"
+            local combinedText = {}
+            for _, turn in ipairs(batch.turns) do
+                table.insert(combinedText, turn.text)
+            end
+            local stylePrompt = "natural group podcast friend (" .. voiceA .. ") speaking in " .. lang
+                .. ", strictly matching exact mood: " .. mood .. ", keeping identical voice identity, vocal pitch, and lively tone throughout" .. contNote
+            local partObj = { text = table.concat(combinedText, " ") }
+            if modeIdx == 3 then
+                partObj.speechMetadata = { style = stylePrompt }
+            else
+                partObj.speech_metadata = { style = stylePrompt }
+            end
+            table.insert(partsArray, partObj)
+
+            genCfg = {
+                responseModalities = { "AUDIO" },
+                speechConfig = { voiceConfig = { voice = voiceA } }
+            }
         end
 
-        local genCfg = {
-            responseModalities = { "AUDIO" },
-            speechConfig = { voiceConfig = { voice = voice } }
-        }
         if modeIdx == 1 then
             genCfg.temperature = 0.0
-            genCfg.seed = 424242 + spkIdx
+            genCfg.seed = 424242 + spkList[1]
         elseif modeIdx == 2 then
             genCfg.temperature = 0.05
-            genCfg.seed = 424242 + spkIdx
+            genCfg.seed = 424242 + spkList[1]
         end
 
         local payload = {
-            contents = { { role = "user", parts = { partObj } } },
+            contents = { { role = "user", parts = partsArray } },
             generationConfig = genCfg
         }
 
         local okP, errP = M.httpPost(url, cjson.encode(payload), headers, function(code, content)
-            if isCanceled() then cleanupTempFiles(tempFiles) return end
+            if isCanceled() then return end
 
             if code == 400 and modeIdx < 4 then
-                M.delay(400, function() processTurn(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
+                M.delay(100, function() processBatch(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
                 return
             end
 
@@ -2053,10 +2463,10 @@ function M.startBroadcastAudioJob(inputText)
                 M.logIssue("GroupPart" .. tostring(partIdx), "Model " .. curModel .. " HTTP " .. tostring(code) .. ": " .. tostring(M.extractApiError(content) or "Busy"))
                 local altKey = M.getAlternateApiKey(curKey)
                 if altKey and keyRetries < 4 then
-                    M.delay(800, function() processTurn(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
+                    M.delay(250, function() processBatch(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
                     return
                 elseif ttsIdx < #ttsQueue then
-                    M.delay(1000, function() processTurn(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
+                    M.delay(300, function() processBatch(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
                     return
                 end
             end
@@ -2068,19 +2478,18 @@ function M.startBroadcastAudioJob(inputText)
                     return
                 end
 
-                local pf = File(M.baseStorageDir, "tmp_grp_" .. tostring(myJobId) .. "_" .. tostring(partIdx) .. ".pcm")
+                local pf = M.getResumePartFile(partIdx)
                 local okSave, errSave = writePcmArraysToFile(pf, byteArrays)
                 if not okSave then
                     stopOnError("Part " .. tostring(partIdx) .. " save error: " .. tostring(errSave))
                     return
                 end
-                table.insert(tempFiles, pf)
 
                 local donePct = math.max(5, math.floor((partIdx / totalParts) * 90))
-                M.updateProgress(donePct, "Dialogue Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " done", false)
+                M.updateProgress(donePct, "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " done", false)
 
                 if partIdx < totalParts then
-                    M.delay(650, function() processTurn(partIdx + 1, 1, 1, M.getNextApiKey(), 0) end)
+                    M.delay(50, function() processBatch(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0) end)
                 else
                     finishGroupMerge()
                 end
@@ -2091,7 +2500,24 @@ function M.startBroadcastAudioJob(inputText)
         if not okP then stopOnError("Request failed: " .. tostring(errP)) end
     end
 
-    processTurn(1, 1, 1, M.getNextApiKey(), 0)
+    if startIdx > totalParts then
+        finishGroupMerge()
+        return
+    end
+    local firstKey = M.getNextApiKey()
+    if startIdx > 1 then
+        M.updateProgress(math.max(5, math.floor(((startIdx - 1) / totalParts) * 90)),
+            "Resuming broadcast from Part " .. tostring(startIdx) .. "/" .. tostring(totalParts) .. " (" .. tostring(startIdx - 1) .. " saved)...", true)
+    else
+        M.updateProgress(5, "Checking active audio models...", false)
+    end
+    M.discoverWorkingTtsModels(firstKey, primaryModel, function(discoveredQueue)
+        if isCanceled() then return end
+        if discoveredQueue and #discoveredQueue > 0 then
+            ttsQueue = discoveredQueue
+        end
+        processBatch(startIdx, 1, 1, firstKey, 0)
+    end)
 end
 -- ============================================================
 -- PART 3 OF 3: Picker Dialogs, Voice Preview Dialog, 5-Key Settings,
@@ -2102,7 +2528,7 @@ end
 -- Stream Copy & File Name Sanitizer Helpers
 -- ============================================================
 local function copyStream(input, output)
-    local buffer = byte[8192]
+    local buffer = byte[32768]
     while true do
         local len = input.read(buffer)
         if len == nil or len == -1 then break end
@@ -2428,6 +2854,10 @@ function M.performDownload(customBaseName)
 
     if success then
         M.clearIssueReport()
+        M.clearAudioResume()
+        M.clearScriptResume()
+        M.clearLastWavPrefs()
+        M.deleteOldAudioFile()
         M.cfg.userText = ""
         M.saveDraftText("")
         M.runOnUi(function()
@@ -2435,11 +2865,16 @@ function M.performDownload(customBaseName)
                 M.isUiInitializing = true
                 if S.ui.textInput then S.ui.textInput.setText("") end
                 if S.ui.charCounter then S.ui.charCounter.setText("0 chars (Unlimited)") end
+                if S.ui.resultLayout then S.ui.resultLayout.setVisibility(View.GONE) end
+                if S.ui.playBtn then
+                    S.ui.playBtn.setEnabled(false)
+                    S.ui.playBtn.setText("PLAY")
+                end
                 M.isUiInitializing = false
             end
         end)
         M.refreshActionButtons()
-        M.updateProgress(100, "Saved as " .. fileName .. "! Box and logs cleared.", true)
+        M.updateProgress(0, "Saved as " .. fileName .. "! Saved parts and box cleared.", true)
         return true
     else
         M.logIssue("Download", lastErr)
@@ -2935,6 +3370,7 @@ function M.showSetApiDialog()
         end
         M.cfg.apiKeys = newKeys
         M.cachedScriptModels = nil
+        M.cachedTtsModels = nil
         M.saveSettings()
         M.speakOnly(tostring(activeCnt) .. " API key(s) saved.")
         apiDialog.dismiss()
@@ -3026,7 +3462,13 @@ function M.showSettingsDialog()
 
     views.setApiBtn.onClick = M.safe("setApi", function() M.showSetApiDialog() end)
     views.modelBtn.onClick = M.safe("modelPick", function()
-        M.showListPickerDialog("Select Audio Model", M.MODEL_LIST, nil, M.cfg.model, function(chosen)
+        local pickList, seenM = {}, {}
+        local function addOpt(m)
+            if m and m ~= "" and not seenM[m] then seenM[m] = true table.insert(pickList, m) end
+        end
+        if M.cachedTtsModels then for _, m in ipairs(M.cachedTtsModels) do addOpt(m) end end
+        for _, m in ipairs(M.MODEL_LIST) do addOpt(m) end
+        M.showListPickerDialog("Select Audio Model", pickList, nil, M.cfg.model, function(chosen)
             M.cfg.model = chosen
             M.saveSettings()
             views.modelBtn.setText("Audio Model: " .. chosen)
@@ -3699,10 +4141,6 @@ function M.showMain()
 
         if S.isGenerating or S.isWritingScript then
             M.speakOnly("Continuing in background. Re-open anytime to check progress.")
-        else
-            if S.generatedAudioPath then
-                M.cancelAndResetSession(nil)
-            end
         end
         mainDialog.dismiss()
     end
@@ -3711,6 +4149,11 @@ function M.showMain()
     M.delay(300, function()
         M.isUiInitializing = false
         M.refreshActionButtons()
+        if M.hasAnyApiKey() and not M.cachedScriptModels then
+            pcall(function()
+                M.discoverAllWorkingModels(M.getPrimaryApiKey(), function() end)
+            end)
+        end
     end)
 end
 
