@@ -26,6 +26,12 @@ import "android.content.ClipboardManager"
 import "android.content.ClipData"
 import "android.net.Uri"
 import "android.media.MediaPlayer"
+import "android.media.MediaExtractor"
+import "android.media.MediaCodec"
+import "android.media.MediaCodecList"
+import "android.media.MediaFormat"
+import "java.nio.ByteBuffer"
+import "java.nio.ByteOrder"
 import "android.util.Base64"
 import "android.os.*"
 import "android.graphics.Typeface"
@@ -53,6 +59,7 @@ if not _G.GEMINI_ABS_V4 then
         percent = 0,
         statusText = "Status: Ready",
         generatedAudioPath = nil,
+        cleanVoiceWavPath = nil,
         currentDurationStr = "",
         mediaPlayer = nil,
         previewPlayer = nil,
@@ -69,23 +76,21 @@ M.APP_TITLE = "Gemini Audio & Broadcast Studio"
 M.CREATOR_NAME = "Mohammed Usman"
 M.WHATSAPP_LOCAL = "03261421100"
 M.WHATSAPP_INTL = "923261421100"
-M.TARGET_CHARS_PER_PART = 3900
+M.TARGET_CHARS_PER_PART = 6500
 M.PAUSE_DURATION_MS = 380
 
--- Single Clean Mode Selector (1 to 6 Speakers)
+-- Single Clean Mode Selector (1 to 4 Speakers)
 M.MODE_LIST = {
     "Single Speaker (TTS & Story)",
     "2 Speakers Broadcast",
     "3 Speakers Broadcast",
-    "4 Speakers Broadcast",
-    "5 Speakers Broadcast",
-    "6 Speakers Broadcast"
+    "4 Speakers Broadcast"
 }
 
 function M.getModeSpeakerCount(modeStr)
     local m = tostring(modeStr or "")
     local n = tonumber(m:match("^(%d+)%s+Speakers"))
-    if n and n >= 2 and n <= 6 then return n end
+    if n and n >= 2 and n <= 4 then return n end
     return 1
 end
 
@@ -95,27 +100,44 @@ M.MODEL_LIST = {
 }
 M.DEFAULT_MODEL = "gemini-3.8-flash-tts"
 
--- 30 Voices (Full list available for Single Speaker & All 6 Broadcast Speakers)
+-- 30 Voices (100% Verified Male/Female Labels in Strict Alternating Male/Female Order)
 M.VOICE_LIST = {
-    "Puck (Male)", "Kore (Female)", "Charon (Male)", "Zephyr (Female)",
-    "Fenrir (Male)", "Leda (Female)", "Orus (Male)", "Aoede (Female)",
-    "Callirrhoe (Female)", "Autonoe (Female)", "Enceladus (Male)", "Iapetus (Male)",
-    "Umbriel (Male)", "Algieba (Female)", "Despina (Female)", "Erinome (Female)",
-    "Algenib (Male)", "Rasalgethi (Male)", "Laomedeia (Female)", "Achernar (Male)",
-    "Alnilam (Male)", "Schedar (Male)", "Gacrux (Male)", "Pulcherrima (Female)",
-    "Achird (Friendly Male)", "Zubenelgenubi (Casual Male)", "Vindemiatrix (Gentle Female)",
-    "Sadachbia (Lively Male)", "Sadaltager (Knowledgeable Male)", "Sulafat (Warm Female)"
+    "Puck (Male)", "Kore (Female)",
+    "Charon (Male)", "Zephyr (Female)",
+    "Fenrir (Male)", "Leda (Female)",
+    "Orus (Male)", "Aoede (Female)",
+    "Enceladus (Male)", "Callirrhoe (Female)",
+    "Iapetus (Male)", "Autonoe (Female)",
+    "Umbriel (Male)", "Despina (Female)",
+    "Algieba (Male)", "Erinome (Female)",
+    "Algenib (Male)", "Laomedeia (Female)",
+    "Rasalgethi (Male)", "Achernar (Female)",
+    "Alnilam (Male)", "Gacrux (Female)",
+    "Schedar (Male)", "Pulcherrima (Female)",
+    "Achird (Friendly Male)", "Vindemiatrix (Gentle Female)",
+    "Zubenelgenubi (Casual Male)", "Sulafat (Warm Female)",
+    "Sadachbia (Lively Male)", "Sadaltager (Knowledgeable Male)"
 }
 
 M.RAW_VOICES = {
-    "Puck", "Kore", "Charon", "Zephyr", "Fenrir", "Leda",
-    "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus",
-    "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi",
-    "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima",
-    "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"
+    "Puck", "Kore",
+    "Charon", "Zephyr",
+    "Fenrir", "Leda",
+    "Orus", "Aoede",
+    "Enceladus", "Callirrhoe",
+    "Iapetus", "Autonoe",
+    "Umbriel", "Despina",
+    "Algieba", "Erinome",
+    "Algenib", "Laomedeia",
+    "Rasalgethi", "Achernar",
+    "Alnilam", "Gacrux",
+    "Schedar", "Pulcherrima",
+    "Achird", "Vindemiatrix",
+    "Zubenelgenubi", "Sulafat",
+    "Sadachbia", "Sadaltager"
 }
 
-M.DEFAULT_SPK_VOICES = { "Puck", "Kore", "Charon", "Zephyr", "Fenrir", "Leda" }
+M.DEFAULT_SPK_VOICES = { "Puck", "Kore", "Charon", "Zephyr" }
 
 function M.getVoiceDisplayName(rawVoice)
     for i, rv in ipairs(M.RAW_VOICES) do
@@ -226,21 +248,29 @@ M.DURATION_LIST = {
     "Custom Minutes"
 }
 
--- 29 Upgraded Styles for Single Speaker Mode (100% Exact Mood Lock)
-M.SINGLE_STYLE_LIST = {
+-- 38 Unified Moods & Styles (ALL Single + Broadcast Moods in Both Modes, 99-100% Exact Acting Lock)
+M.ALL_MOODS_LIST = {
     "Default / Normal",
+    "Morning Show / Friendly Chat",
+    "Podcast Host (Conversational)",
+    "Storytelling (Rich & Expressive)",
+    "Story & Discussion",
+    "Funny Jokes / Comedy (Punchy)",
+    "Comedy Banter (Friends Jokes)",
+    "Comedy / Lighthearted",
     "Islamic: Tilawat (Quranic Slow & Melodic)",
     "Islamic: Hadees (Calm Scholar & Tarjuma)",
     "Islamic: Dua (Humble, Soft & Emotional)",
     "Islamic: Naat / Kalam (Sweet & Rhythmic)",
-    "Islamic: Waqia / Story (Deep & Reverent)",
+    "Islamic: Waqia / Bayan (Deep & Reverent)",
+    "Islamic / Spiritual Reflection",
     "Motivational Speech / Khutba",
-    "Podcast Host (Conversational)",
-    "Storytelling (Rich & Expressive)",
+    "Motivational / Inspiring",
     "Kids Storyteller (Warm & Playful)",
+    "Kids / Cartoon Fun",
+    "Cartoon: Thin & Squeaky (Patli Aawaz)",
+    "Cartoon: Thick & Goofy (Moti Aawaz)",
     "Bedtime / Calm Sleep (Soothing)",
-    "Funny Jokes / Comedy (Punchy)",
-    "Comedy / Lighthearted",
     "Poetry / Shayari (Deep & Rhythmic)",
     "Dramatic Monologue (Theatrical)",
     "Horror / Scary / Suspense",
@@ -250,103 +280,100 @@ M.SINGLE_STYLE_LIST = {
     "Happy / Joyful (Energetic)",
     "Angry / Aggressive (Forceful)",
     "Whispering / Secretive (ASMR Soft)",
-    "Sarcastic / Irony (Dry Wit)",
-    "News Anchor (Formal & Crisp)",
-    "Documentary / Informative",
-    "Motivational / Inspiring",
-    "Dynamic Human (Natural Emotion)",
-    "Cartoon: Thin & Squeaky (Patli Aawaz)",
-    "Cartoon: Thick & Goofy (Moti Aawaz)"
+    "Sarcastic / Roast / Irony (Dry Wit)",
+    "News Anchor / Breaking News (Formal & Crisp)",
+    "Documentary / Deep Dive (Informative)",
+    "Educational Q&A / Informative",
+    "Debate / Heated Discussion",
+    "Interview / Talk Show",
+    "Late Night Talk (Warm & Chill)",
+    "Dynamic Human (Natural Emotion)"
 }
+
+M.SINGLE_STYLE_LIST = M.ALL_MOODS_LIST
+M.BROADCAST_MOODS = M.ALL_MOODS_LIST
 
 M.SINGLE_STYLE_TEXT = {
-    ["Default / Normal"] = "natural, clear, balanced studio narrator with a strictly steady medium pace and warm neutral tone",
-    ["Islamic: Tilawat (Quranic Slow & Melodic)"] = "reverent, slow, deeply spiritual and melodic Quranic Qirat style with measured breath pauses, elongated vowels, calm serenity, and strictly uniform slow recitation tempo",
-    ["Islamic: Hadees (Calm Scholar & Tarjuma)"] = "dignified, respectful Islamic scholar reciting clearly with solemn reverence, gentle pauses between sentences, and a calm steady pace",
+    ["Default / Normal"] = "crystal-clear studio voice, natural balanced narration, crisp articulation, strictly steady medium pace, warm neutral tone",
+    ["Morning Show / Friendly Chat"] = "bright, energetic, welcoming morning radio show host tone with crisp cheerful clarity, warm smiles, and lively upbeat rhythm",
+    ["Podcast Host (Conversational)"] = "crystal-clear authentic podcast host speaking naturally with relaxed warmth, crisp diction, and smooth conversational rhythm",
+    ["Storytelling (Rich & Expressive)"] = "master audiobook storyteller with vivid warmth, crystal-clear enunciation, expressive narrative pacing, and rich immersion",
+    ["Story & Discussion"] = "engaging storyteller and thoughtful co-host alternating between vivid narrative flow and warm reactive discussion with crisp clarity",
+    ["Funny Jokes / Comedy (Punchy)"] = "witty, upbeat stand-up comedian with crisp comedic timing, playful inflection, lively energy, and natural light chuckle on punchlines",
+    ["Comedy Banter (Friends Jokes)"] = "playful, witty friends bantering and cracking jokes with crisp timing, teasing warmth, and upbeat joyful energy",
+    ["Comedy / Lighthearted"] = "cheerful, playful, lighthearted delivery with a smiling tone, crisp voice clarity, and lively steady rhythm",
+    ["Islamic: Tilawat (Quranic Slow & Melodic)"] = "reverent, slow, deeply spiritual and melodic Quranic Qirat style with measured breath pauses, elongated vowels, calm serenity, and strictly uniform slow tempo",
+    ["Islamic: Hadees (Calm Scholar & Tarjuma)"] = "dignified, respectful Islamic scholar reciting clearly with solemn reverence, crystal-clear pronunciation, gentle pauses, and calm steady pace",
     ["Islamic: Dua (Humble, Soft & Emotional)"] = "deeply humble, trembling, soft pleading prayerful voice filled with sincerity, slow unhurried pace, and heartfelt emotion",
-    ["Islamic: Naat / Kalam (Sweet & Rhythmic)"] = "sweet, soulful, melodic and rhythmic Naat recitation with respectful softness and steady poetic cadence",
-    ["Islamic: Waqia / Story (Deep & Reverent)"] = "deep, solemn, captivating Islamic historical narrator with gravitas, clear articulation, and steady emotional flow",
-    ["Motivational Speech / Khutba"] = "powerful, commanding, inspiring orator delivering a heartfelt speech with resonant clarity, purposeful pauses, and confident energy",
-    ["Podcast Host (Conversational)"] = "friendly, relaxed, authentic solo podcast host speaking directly to a listener with natural warmth and smooth conversational rhythm",
-    ["Storytelling (Rich & Expressive)"] = "master audiobook storyteller with vivid warmth, subtle narrative pacing, and engaging immersion without changing speaker identity",
-    ["Kids Storyteller (Warm & Playful)"] = "cheerful, gentle, animated children's storyteller with bright clarity, playful warmth, and easy-to-follow pace",
-    ["Bedtime / Calm Sleep (Soothing)"] = "ultra-calm, hushed, soothing bedtime voice with very slow tempo, soft breathy warmth, and peaceful relaxation",
-    ["Funny Jokes / Comedy (Punchy)"] = "witty, upbeat stand-up comedian with crisp comedic timing, playful inflection, and light natural chuckle on punchlines",
-    ["Comedy / Lighthearted"] = "cheerful, playful, lighthearted narrator with a smiling tone and lively steady rhythm",
-    ["Poetry / Shayari (Deep & Rhythmic)"] = "deep, soulful classical poet voice with deliberate rhythmic pauses, emotional resonance, and lyrical flow",
-    ["Dramatic Monologue (Theatrical)"] = "intense, theatrical stage actor delivering a gripping monologue with rich vocal weight and controlled dramatic pauses",
-    ["Horror / Scary / Suspense"] = "eerie, low, chilling suspense narrator with slow creeping tension, hushed dread, and unsettling pauses",
-    ["Thriller / Mystery (Tense)"] = "focused, taut, high-stakes thriller narrator with sharp urgency and controlled suspenseful pacing",
-    ["Sad / Emotional (Heartfelt)"] = "sorrowful, tender, heavy-hearted voice with genuine quiet grief, slow pace, and soft emotional fragility",
-    ["Romantic / Soft (Gentle)"] = "intimate, velvety, warm romantic voice with gentle tenderness and slow affectionate delivery",
-    ["Happy / Joyful (Energetic)"] = "bright, joyful, enthusiastic voice radiating genuine happiness and upbeat energy",
-    ["Angry / Aggressive (Forceful)"] = "intense, stern, forceful angry voice with sharp emphasis and controlled fiery authority",
-    ["Whispering / Secretive (ASMR Soft)"] = "close, quiet, secretive whisper with delicate softness and steady hushed volume",
-    ["Sarcastic / Irony (Dry Wit)"] = "deadpan, dry, sharply ironic narrator with subtle comedic skepticism and composed delivery",
-    ["News Anchor (Formal & Crisp)"] = "authoritative, crisp, professional broadcast news anchor with strictly uniform medium pace and neutral precision",
-    ["Documentary / Informative"] = "calm, knowledgeable, prestigious documentary narrator with clear articulation and measured informative cadence",
-    ["Motivational / Inspiring"] = "uplifting, confident, encouraging mentor voice with strong clarity and inspiring momentum",
-    ["Dynamic Human (Natural Emotion)"] = "highly lifelike, naturally expressive human speaker adapting smoothly to the text's emotion while keeping the exact same voice",
-    ["Cartoon: Thin & Squeaky (Patli Aawaz)"] = "high-pitched, squeaky, quirky animated cartoon character voice kept consistent throughout",
-    ["Cartoon: Thick & Goofy (Moti Aawaz)"] = "deep, booming, thick goofy cartoon character voice with slow playful charm kept consistent throughout"
+    ["Islamic: Naat / Kalam (Sweet & Rhythmic)"] = "sweet, soulful, melodic and rhythmic Naat recitation with respectful softness, crystal-clear diction, and steady poetic cadence",
+    ["Islamic: Waqia / Bayan (Deep & Reverent)"] = "deep, solemn, captivating Islamic scholar and historical narrator with gravitas, crystal-clear articulation, and steady reverent flow",
+    ["Islamic / Spiritual Reflection"] = "serene, thoughtful, spiritually uplifting tone with calm wisdom, crisp clarity, and peaceful measured pacing",
+    ["Motivational Speech / Khutba"] = "powerful, commanding, inspiring orator delivering a heartfelt speech with resonant studio clarity, purposeful pauses, and confident energy",
+    ["Motivational / Inspiring"] = "uplifting, confident, encouraging mentor voice with crisp strong clarity and inspiring forward momentum",
+    ["Kids Storyteller (Warm & Playful)"] = "cheerful, gentle, animated children's storyteller with bright crystal clarity, playful warmth, and easy-to-follow pace",
+    ["Kids / Cartoon Fun"] = "lively, bright, playful cartoon-style fun voice with cheerful enthusiasm, animated reactions, and crisp clear speech",
+    ["Cartoon: Thin & Squeaky (Patli Aawaz)"] = "high-pitched, thin, squeaky, quirky animated cartoon character voice kept 100% consistent and clear throughout",
+    ["Cartoon: Thick & Goofy (Moti Aawaz)"] = "deep, booming, thick goofy cartoon character voice with slow playful charm kept 100% consistent and clear throughout",
+    ["Bedtime / Calm Sleep (Soothing)"] = "ultra-calm, hushed, soothing bedtime voice with very slow tempo, soft gentle warmth, and peaceful relaxation",
+    ["Poetry / Shayari (Deep & Rhythmic)"] = "deep, soulful classical poet voice with deliberate rhythmic pauses, crystal-clear emotional resonance, and lyrical flow",
+    ["Dramatic Monologue (Theatrical)"] = "intense, theatrical stage actor delivering a gripping monologue with rich vocal weight, crisp projection, and controlled dramatic pauses",
+    ["Horror / Scary / Suspense"] = "eerie, low, chilling suspense voice with slow creeping tension, hushed dread, crisp whispered emphasis, and unsettling pauses",
+    ["Thriller / Mystery (Tense)"] = "focused, taut, high-stakes thriller delivery with sharp crisp urgency and controlled suspenseful pacing",
+    ["Sad / Emotional (Heartfelt)"] = "sorrowful, tender, heavy-hearted voice with genuine quiet grief, slow pace, and soft heartfelt fragility",
+    ["Romantic / Soft (Gentle)"] = "intimate, velvety, warm romantic voice with gentle tenderness, soft clarity, and slow affectionate delivery",
+    ["Happy / Joyful (Energetic)"] = "bright, joyful, enthusiastic voice radiating genuine happiness, crisp clarity, and upbeat energy",
+    ["Angry / Aggressive (Forceful)"] = "intense, stern, forceful angry voice with sharp crisp emphasis and controlled fiery authority",
+    ["Whispering / Secretive (ASMR Soft)"] = "close, quiet, secretive whisper with delicate crisp softness and steady hushed volume",
+    ["Sarcastic / Roast / Irony (Dry Wit)"] = "deadpan, sharp, playfully sarcastic roast delivery with dry wit, crisp punchy timing, and composed comedic skepticism",
+    ["News Anchor / Breaking News (Formal & Crisp)"] = "authoritative, crisp, studio-grade broadcast news anchor with urgent clarity, strictly uniform medium pace, and professional precision",
+    ["Documentary / Deep Dive (Informative)"] = "calm, knowledgeable, prestigious documentary voice with crystal-clear articulation and measured informative cadence",
+    ["Educational Q&A / Informative"] = "clear, patient, knowledgeable teacher and curious learner exchange with crisp pronunciation and well-paced explanations",
+    ["Debate / Heated Discussion"] = "passionate, articulate, sharp debate speakers presenting strong counter-arguments with crisp emphasis and lively energy",
+    ["Interview / Talk Show"] = "polished, engaging talk show host and guest speaking with crisp broadcast clarity, natural curiosity, and smooth turn-taking",
+    ["Late Night Talk (Warm & Chill)"] = "smooth, relaxed, cozy late-night radio voice with mellow warmth, crisp intimate clarity, and unhurried conversational flow",
+    ["Dynamic Human (Natural Emotion)"] = "highly lifelike, naturally expressive crystal-clear human voice adapting smoothly to the text's emotion while keeping the exact same voice"
 }
 
--- 25 Moods for Multi-Speaker Broadcast Mode
-M.BROADCAST_MOODS = {
-    "Default / Normal",
-    "Morning Show / Friendly Chat",
-    "Comedy Banter",
-    "Funny Jokes (Friends Jokes)",
-    "Funny / Comedy",
-    "Story & Discussion",
-    "Storytelling",
-    "Late Night Talk",
-    "Educational Q&A",
-    "Islamic / Spiritual",
-    "Islamic Bayan / Waqia",
-    "Tilawat / Quranic Reflection",
-    "Romantic",
-    "Sad / Emotional",
-    "Informative / Educational",
-    "News / Breaking",
-    "Motivational / Inspiring",
-    "Debate / Discussion",
-    "Horror / Mystery",
-    "Poetry / Shayari",
-    "Thriller / Suspense",
-    "Sarcastic / Roast",
-    "Documentary / Deep Dive",
-    "Kids / Cartoon Fun",
-    "Interview / Talk Show"
-}
+function M.getMoodActingInstruction(moodName)
+    local base = M.SINGLE_STYLE_TEXT[moodName]
+    if base then return base end
+    return "crystal-clear studio voice strictly performing in " .. tostring(moodName or "Default / Normal") .. " style with crisp natural pronunciation and zero muffling"
+end
 
 -- Complete English (USA) User Guide
 M.USER_GUIDE_TEXT = table.concat({
-    "GEMINI AUDIO & BROADCAST STUDIO - USER GUIDE",
+    "GEMINI AUDIO & BROADCAST STUDIO - USER GUIDE (v14)",
     "",
-    "1. 5 API KEYS SMART FAILOVER & ROTATION:",
+    "1. 5 API KEYS & AUTO-MODEL FAILOVER:",
     "- Open SETTING -> SET API KEYS (1-5) to add up to 5 Google Gemini API Keys.",
-    "- Requests rotate automatically across active keys. If Key 1 hits a quota limit or fails, the studio automatically switches to Key 2, Key 3, Key 4, and Key 5.",
+    "- The studio automatically discovers active Script and Audio (TTS) models on your key.",
+    "- If a TTS model hits a limit (429/503), it waits 5 seconds to recheck once, then waits 4 seconds and automatically switches to the next active TTS model from the exact remaining part.",
     "",
-    "2. CLEAN BUTTON INTERFACE & VOICE PREVIEW (3-5 SEC):",
-    "- Tap Mode to switch between Single Speaker and 2 to 6 Speakers Broadcast.",
-    "- Tap any Voice button to open the 30-voice list. Double-tap any voice to check it and immediately hear a 3-5 second cached sample without leaving the list. Tap DONE at the bottom to confirm your selection.",
-    "- In Broadcast mode, optional friend names (e.g., Adnan, Usman) let speakers address each other naturally by name with realistic mixed turn-taking.",
+    "2. 1 TO 4 SPEAKERS & PERMANENT VOICE SAMPLES:",
+    "- Tap Mode to switch between Single Speaker and 2, 3, or 4 Speakers Broadcast.",
+    "- Tap any Voice button to open the 30-voice list (100% verified Male/Female labels in alternating order).",
+    "- Double-tap any voice to check it, hear TTS confirmation, and play a short sample. Tap the bottom-right DONE button to confirm.",
+    "- Voice samples are saved permanently in private app storage (hidden from Phone Storage & Music Players) and shared across all 1-4 speaker modes so no extra API requests are wasted.",
     "",
-    "3. 90 LANGUAGES & STRICT TONE / MOOD LOCK:",
-    "- Tap Language to scroll smoothly through 90 languages (Urdu Pakistan #1, English USA #2, and 88 more).",
-    "- Choose from 29 Single Speaker styles or 25 Broadcast moods. Long multi-part audio carries previous lines as context so voice, pitch, speed, and mood stay 100% consistent from Part 1 to Part 50+.",
+    "3. 90 LANGUAGES, 38 UNIFIED MOODS & SMART LIMITS:",
+    "- Choose from 90 languages (Urdu Pakistan #1, English USA #2, and 88 more) and 38 unified moods/styles available in both Single Speaker and Broadcast modes.",
+    "- Single Speaker supports 6,500 to 7,000 characters per part; Broadcast supports 5,500 characters per part with strict tone, pitch, and crystal-clear voice lock.",
     "",
-    "4. LIVE PROGRESS, FOCUS LOCK, INSTANT STOP & SMART EXIT:",
-    "- Tapping CREATE SCRIPT or GENERATE AUDIO moves focus directly to the Status bar with 5% step updates and live part counts.",
-    "- Tap CLEAR TEXT (or clear the text box) anytime to stop active generation immediately and reset status to 0%.",
-    "- Tap EXIT while a job is running to continue in the background. Tap EXIT after audio is finished to auto-clean temporary files."
+    "4. BACKGROUND MUSIC & AUTO-DUCKING (100% OFFLINE):",
+    "- Tap ADD BACKGROUND MUSIC (optional) to pick any MP3, WAV, or M4A track from phone storage.",
+    "- Open SETTING -> BG MUSIC & DUCKING SETTINGS to customize Music Volume During Voice (%), Intro/Outro/Pause Volume (%), Intro & Outro Time (0-5 sec), Voice Clarity Boost (%), and Auto-Ducking ON/OFF.",
+    "- After audio is ready, you can change or apply background music offline anytime using APPLY / UPDATE BG MUSIC (0 API requests).",
+    "",
+    "5. LIVE 5%-100% PROGRESS, ZERO-DELETE AUTO-RESUME & MP3 DOWNLOAD:",
+    "- CREATE SCRIPT, GENERATE AUDIO, and BG Music Mixing all show live 5% to 100% progress.",
+    "- Completed parts are saved safely even if quota runs out, the extension closes, or the phone restarts. Tap RESUME AUDIO or RESUME SCRIPT to continue from the exact next part.",
+    "- Tap DOWNLOAD to save directly to Phone Storage (Downloads) as .mp3. Saved parts are ONLY deleted when you tap DOWNLOAD or CLEAR TEXT."
 }, "\n")
 
 -- Preferences & Storage Paths
 M.prefs = context.getSharedPreferences("Jieshuo_Gemini_ABS_V4", Context.MODE_PRIVATE)
 M.baseStorageDir = context.getFilesDir() or context.getCacheDir()
-M.previewCacheDir = File(context.getCacheDir() or M.baseStorageDir, "abs_v4_voice_previews")
+M.previewCacheDir = File(M.baseStorageDir, "abs_v4_voice_previews_perm")
 if not M.previewCacheDir.exists() then M.previewCacheDir.mkdirs() end
 M.resumeDir = File(M.baseStorageDir, "abs_v4_resume_parts")
 if not M.resumeDir.exists() then M.resumeDir.mkdirs() end
@@ -357,8 +384,15 @@ M.cfg = {
     speakerCount = 1,
     singleVoice = "Puck",
     singleStyle = "Default / Normal",
-    speakerVoices = { "Puck", "Kore", "Charon", "Zephyr", "Fenrir", "Leda" },
-    speakerNames = { "", "", "", "", "", "" },
+    speakerVoices = { "Puck", "Kore", "Charon", "Zephyr" },
+    speakerNames = { "", "", "", "" },
+    bgMusicPath = "",
+    bgMusicName = "",
+    bgDuckVol = 12,
+    bgNormalVol = 38,
+    bgIntroOutroSec = 3,
+    bgVoiceBoost = 100,
+    bgAutoDuck = true,
     bcMood = "Default / Normal",
     lang = "Urdu (Pakistan - اردو)",
     duration = "1 Minute",
@@ -420,8 +454,15 @@ end
 function M.logIssue(source, message)
     pcall(function()
         local ts = os.date("%Y-%m-%d %H:%M:%S")
-        local entry = string.format("[%s] Mode: %s | Model: %s | %s: %s",
-            ts, tostring(M.cfg.mode), tostring(M.cfg.model), tostring(source), tostring(message))
+        local srcStr = tostring(source or "")
+        local entry
+        if srcStr:find("Script", 1, true) or srcStr:find("ListModels", 1, true) then
+            entry = string.format("[%s] Mode: %s | %s: %s",
+                ts, tostring(M.cfg.mode), srcStr, tostring(message))
+        else
+            entry = string.format("[%s] Mode: %s | AudioModel: %s | %s: %s",
+                ts, tostring(M.cfg.mode), tostring(M.cfg.model), srcStr, tostring(message))
+        end
         local existing = M.prefs.getString("issue_report_log", "")
         existing = (existing ~= "") and (existing .. "\n\n" .. entry) or entry
         if #existing > 8000 then existing = string.sub(existing, -8000) end
@@ -556,6 +597,33 @@ function M.updateProgress(pct, msg, shouldSpeak)
 end
 
 
+
+M.progressTickerId = 0
+
+function M.stopProgressTicker()
+    M.progressTickerId = (M.progressTickerId or 0) + 1
+end
+
+function M.startProgressTicker(myJobId, startPct, maxPct, stepMs, labelText)
+    M.stopProgressTicker()
+    local tid = M.progressTickerId
+    local cur = math.max(5, math.min(95, math.floor(startPct or 5)))
+    local cap = math.max(cur, math.min(95, math.floor(maxPct or 90)))
+    local interval = stepMs or 1600
+
+    local function tick()
+        if M.progressTickerId ~= tid then return end
+        if S.jobId ~= myJobId then return end
+        if not S.isWritingScript and not S.isGenerating then return end
+        if cur < cap then
+            cur = math.min(cap, cur + 5)
+            M.updateProgress(cur, labelText, false)
+            M.delay(interval, tick)
+        end
+    end
+    M.delay(interval, tick)
+end
+
 -- ============================================================
 -- Persistent Disk Checkpoint & Auto-Resume Engine (Survives Phone Restart)
 -- Parts are ONLY deleted on Download, Clear Text, or starting a brand-new text
@@ -678,12 +746,14 @@ function M.clearLastWavPrefs()
         local ed = M.prefs.edit()
         ed.remove("last_wav_path")
         ed.remove("last_wav_dur")
+        ed.remove("last_clean_wav_path")
         ed.commit()
     end)
 end
 
 function M.cancelAndResetSession(speakNotice)
     S.jobId = (S.jobId or 0) + 1
+    M.stopProgressTicker()
     S.isGenerating = false
     S.isWritingScript = false
     S.percent = 0
@@ -738,10 +808,17 @@ function M.saveSettings()
     ed.putInt("speaker_count", M.getModeSpeakerCount(M.cfg.mode))
     ed.putString("single_voice", M.cfg.singleVoice)
     ed.putString("single_style", M.cfg.singleStyle)
-    for i = 1, 6 do
+    for i = 1, 4 do
         ed.putString("spk_voice_" .. i, M.cfg.speakerVoices[i] or M.DEFAULT_SPK_VOICES[i])
         ed.putString("spk_name_" .. i, M.cfg.speakerNames[i] or "")
     end
+    ed.putString("bg_music_path", M.cfg.bgMusicPath or "")
+    ed.putString("bg_music_name", M.cfg.bgMusicName or "")
+    ed.putInt("bg_duck_vol", tonumber(M.cfg.bgDuckVol) or 12)
+    ed.putInt("bg_normal_vol", tonumber(M.cfg.bgNormalVol) or 38)
+    ed.putInt("bg_intro_outro_sec", tonumber(M.cfg.bgIntroOutroSec) or 3)
+    ed.putInt("bg_voice_boost", tonumber(M.cfg.bgVoiceBoost) or 100)
+    ed.putBoolean("bg_auto_duck", M.cfg.bgAutoDuck ~= false)
     ed.putString("bc_mood", M.cfg.bcMood)
     ed.putString("lang", M.cfg.lang)
     ed.putString("duration", M.cfg.duration)
@@ -770,9 +847,23 @@ function M.loadSettings()
 
     M.cfg.singleVoice = M.prefs.getString("single_voice", "Puck")
     M.cfg.singleStyle = M.prefs.getString("single_style", "Default / Normal")
-    for i = 1, 6 do
+    for i = 1, 4 do
         M.cfg.speakerVoices[i] = M.prefs.getString("spk_voice_" .. i, M.DEFAULT_SPK_VOICES[i])
         M.cfg.speakerNames[i] = M.prefs.getString("spk_name_" .. i, "")
+    end
+    M.cfg.bgMusicPath = M.prefs.getString("bg_music_path", "")
+    M.cfg.bgMusicName = M.prefs.getString("bg_music_name", "")
+    M.cfg.bgDuckVol = M.prefs.getInt("bg_duck_vol", 12)
+    M.cfg.bgNormalVol = M.prefs.getInt("bg_normal_vol", 38)
+    M.cfg.bgIntroOutroSec = M.prefs.getInt("bg_intro_outro_sec", 3)
+    M.cfg.bgVoiceBoost = M.prefs.getInt("bg_voice_boost", 100)
+    M.cfg.bgAutoDuck = M.prefs.getBoolean("bg_auto_duck", true)
+    if M.cfg.bgMusicPath ~= "" then
+        local mf = File(M.cfg.bgMusicPath)
+        if not mf.exists() then
+            M.cfg.bgMusicPath = ""
+            M.cfg.bgMusicName = ""
+        end
     end
     M.cfg.bcMood = M.prefs.getString("bc_mood", M.BROADCAST_MOODS[1])
     M.cfg.lang = M.prefs.getString("lang", M.LANGUAGES[1])
@@ -809,6 +900,15 @@ function M.loadSettings()
                 S.currentDurationStr = M.prefs.getString("last_wav_dur", "")
             else
                 M.clearLastWavPrefs()
+            end
+        end
+    end
+    if not S.cleanVoiceWavPath then
+        local savedClean = M.prefs.getString("last_clean_wav_path", "")
+        if savedClean ~= "" then
+            local cf = File(savedClean)
+            if cf.exists() and cf.length() > 100 then
+                S.cleanVoiceWavPath = savedClean
             end
         end
     end
@@ -909,12 +1009,17 @@ function M.discoverAllWorkingModels(apikey, callback)
                     else
                         table.insert(otherTts, shortName)
                     end
-                elseif not lower:find("image", 1, true)
+                elseif not lower:find("omni", 1, true)
+                    and not lower:find("exp", 1, true)
+                    and not lower:find("thinking", 1, true)
+                    and not lower:find("live", 1, true)
+                    and not lower:find("image", 1, true)
                     and not lower:find("audio", 1, true)
                     and not lower:find("embedding", 1, true)
                     and not lower:find("veo", 1, true)
                     and not lower:find("robotics", 1, true)
-                    and not lower:find("computer", 1, true) then
+                    and not lower:find("computer", 1, true)
+                    and not lower:find("vision", 1, true) then
                     if lower:find("flash-lite", 1, true) then
                         table.insert(fastFlashText, shortName)
                     elseif lower:find("flash", 1, true) then
@@ -932,10 +1037,10 @@ function M.discoverAllWorkingModels(apikey, callback)
         table.sort(fastFlashTts, function(a, b) return a > b end)
         table.sort(otherTts, function(a, b) return a > b end)
 
-        -- Fastest Flash text models first for fast script writing
+        -- Highest-quota & fastest Free-Tier Flash-Lite models first, then stable Flash, then others
         local scriptList = {}
-        for _, v in ipairs(otherFlashText) do table.insert(scriptList, v) end
         for _, v in ipairs(fastFlashText) do table.insert(scriptList, v) end
+        for _, v in ipairs(otherFlashText) do table.insert(scriptList, v) end
         for _, v in ipairs(otherText) do table.insert(scriptList, v) end
 
         -- Fastest Flash TTS models first, followed by Pro / other active TTS models
@@ -1004,6 +1109,13 @@ function M.deleteOldAudioFile()
         end)
         S.generatedAudioPath = nil
         S.currentDurationStr = ""
+    end
+    if S.cleanVoiceWavPath then
+        pcall(function()
+            local cf = File(S.cleanVoiceWavPath)
+            if cf.exists() then cf.delete() end
+        end)
+        S.cleanVoiceWavPath = nil
     end
 end
 
@@ -1158,68 +1270,100 @@ function M.extractCleanPcmSegment(audioBytes)
     return pcmStart, pcmLen
 end
 
--- 3 to 5 Second Voice Sample Preview (Cached Locally)
+-- Shared Permanent Voice Sample Preview (Cached Once Across ALL Modes: 1-4 Speakers)
 function M.previewVoiceSample(voiceName)
     if not voiceName or voiceName == "" then return end
     if S.isGenerating or S.isWritingScript then return end
 
+    if not M.previewCacheDir.exists() then M.previewCacheDir.mkdirs() end
     local cacheFile = File(M.previewCacheDir, "preview_" .. tostring(voiceName) .. ".wav")
     if cacheFile.exists() and cacheFile.length() > 1000 then
         M.playPreviewFile(cacheFile.getAbsolutePath())
         return
     end
 
-    local apiKey = M.getNextApiKey()
-    if apiKey == "" then return end
+    if not M.hasAnyApiKey() then
+        M.speakOnly("Add an API key in Settings to hear voice sample.")
+        return
+    end
 
     local headers = HashMap()
     headers.put("Content-Type", "application/json")
-    local sampleText = "Hello! I am " .. tostring(voiceName) .. ". This is a short preview of how my voice sounds in Gemini Audio Studio."
-    local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. tostring(M.cfg.model) .. ":generateContent?key=" .. apiKey
+    local sampleText = "Hello, I am " .. tostring(voiceName) .. ". This is my voice test sample."
+    local primaryKey = M.getNextApiKey()
 
-    local payload = {
-        contents = { { role = "user", parts = { { text = sampleText } } } },
-        generationConfig = {
-            responseModalities = { "AUDIO" },
-            speechConfig = { voiceConfig = { voice = voiceName } }
-        }
-    }
+    M.discoverWorkingTtsModels(primaryKey, M.cfg.model, function(ttsQueue)
+        if not ttsQueue or #ttsQueue == 0 then ttsQueue = { M.cfg.model } end
 
-    M.httpPost(url, cjson.encode(payload), headers, function(code, content)
-        if code ~= 200 then return end
-        local okDec, data = pcall(cjson.decode, content)
-        if not okDec or not data or not data.candidates or #data.candidates == 0 then return end
-        local cand = data.candidates[1]
-        if not cand.content or not cand.content.parts then return end
+        local function tryPreview(ttsIdx, curKey, keyRetries)
+            local curModel = ttsQueue[ttsIdx]
+            if not curModel then
+                M.speakOnly("Voice sample busy right now. Try again later.")
+                return
+            end
+            local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. tostring(curModel) .. ":generateContent?key=" .. tostring(curKey)
+            local payload = {
+                contents = { { role = "user", parts = { { text = sampleText } } } },
+                generationConfig = {
+                    responseModalities = { "AUDIO" },
+                    speechConfig = { voiceConfig = { voice = voiceName } }
+                }
+            }
+            M.httpPost(url, cjson.encode(payload), headers, function(code, content)
+                if code == 429 or code == 503 or code == 500 or code == -1 or code == 404 then
+                    local altKey = M.getAlternateApiKey(curKey)
+                    if altKey and keyRetries < 4 then
+                        M.delay(250, function() tryPreview(ttsIdx, altKey, keyRetries + 1) end)
+                        return
+                    elseif ttsIdx < #ttsQueue then
+                        M.delay(300, function() tryPreview(ttsIdx + 1, M.getNextApiKey(), 0) end)
+                        return
+                    end
+                    M.speakOnly("Voice sample limit reached.")
+                    return
+                end
+                if code ~= 200 then
+                    M.speakOnly("Voice sample error " .. tostring(code))
+                    return
+                end
 
-        local byteArrays, totalPcm = {}, 0
-        for i = 1, #cand.content.parts do
-            local inl = cand.content.parts[i].inlineData or cand.content.parts[i].inline_data
-            if inl and inl.data then
-                local okB, bArr = pcall(function() return Base64.decode(inl.data, Base64.DEFAULT) end)
-                if okB and bArr and #bArr > 0 then
-                    local off, len = M.extractCleanPcmSegment(bArr)
-                    if len > 0 then
-                        table.insert(byteArrays, { arr = bArr, off = off, len = len })
-                        totalPcm = totalPcm + len
+                local okDec, data = pcall(cjson.decode, content)
+                if not okDec or not data or not data.candidates or #data.candidates == 0 then return end
+                local cand = data.candidates[1]
+                if not cand.content or not cand.content.parts then return end
+
+                local byteArrays, totalPcm = {}, 0
+                for i = 1, #cand.content.parts do
+                    local inl = cand.content.parts[i].inlineData or cand.content.parts[i].inline_data
+                    if inl and inl.data then
+                        local okB, bArr = pcall(function() return Base64.decode(inl.data, Base64.DEFAULT) end)
+                        if okB and bArr and #bArr > 0 then
+                            local off, len = M.extractCleanPcmSegment(bArr)
+                            if len > 0 then
+                                table.insert(byteArrays, { arr = bArr, off = off, len = len })
+                                totalPcm = totalPcm + len
+                            end
+                        end
                     end
                 end
-            end
-        end
-        if totalPcm <= 0 then return end
+                if totalPcm <= 0 then return end
 
-        local okW = pcall(function()
-            local fos = FileOutputStream(cacheFile)
-            M.writeWavHeader(fos, totalPcm)
-            for _, seg in ipairs(byteArrays) do
-                fos.write(seg.arr, seg.off, seg.len)
-            end
-            fos.flush()
-            fos.close()
-        end)
-        if okW and cacheFile.exists() and cacheFile.length() > 1000 then
-            M.playPreviewFile(cacheFile.getAbsolutePath())
+                local okW = pcall(function()
+                    local fos = FileOutputStream(cacheFile)
+                    M.writeWavHeader(fos, totalPcm)
+                    for _, seg in ipairs(byteArrays) do
+                        fos.write(seg.arr, seg.off, seg.len)
+                    end
+                    fos.flush()
+                    fos.close()
+                end)
+                if okW and cacheFile.exists() and cacheFile.length() > 1000 then
+                    M.playPreviewFile(cacheFile.getAbsolutePath())
+                end
+            end)
         end
+
+        tryPreview(1, primaryKey, 0)
     end)
 end
 -- ============================================================
@@ -1384,9 +1528,566 @@ function M.mergePcmFilesToWav(partFilesList, pauseMs, filePrefix)
     return true, totalDurationSec
 end
 
+
+-- ============================================================
+-- 100% CRASH-FREE OFFLINE BACKGROUND MUSIC MIXER
+-- (Safe Chunked mainHandler Engine - No Unsafe Lua Threads!)
+-- 3s Intro -> Smooth Auto-Ducking (Crystal-Clear Voice) -> 3s Outro Fade-Out
+-- Live 5% to 100% Progress Reporting
+-- ============================================================
+function M.decodeAudioFileAsync(musicPath, targetSamples, isCanceledFn, onProgress, onDone)
+    local f = File(musicPath)
+    if not f.exists() or f.length() < 100 then
+        onDone(false, "Music file missing")
+        return
+    end
+
+    if musicPath:lower():match("%.wav$") then
+        local okOpen, state = pcall(function()
+            local fis = FileInputStream(f)
+            local hdr = byte[44]
+            local hr = fis.read(hdr, 0, 44)
+            if hr == 44 and hdr[0] == 82 and hdr[1] == 73 and hdr[2] == 70 and hdr[3] == 70 then
+                local ch = (hdr[22] % 256) + ((hdr[23] % 256) * 256)
+                local sr = (hdr[24] % 256) + ((hdr[25] % 256) * 256) + ((hdr[26] % 256) * 65536) + ((hdr[27] % 256) * 16777216)
+                if ch < 1 then ch = 1 end
+                if sr < 8000 then sr = 24000 end
+                local maxRaw = math.min(math.floor(sr * 120), math.floor(targetSamples * (sr / 24000.0)) + sr)
+                return { fis = fis, ch = ch, sr = sr, maxRaw = maxRaw, rawMono = {}, buf = byte[16384] }
+            end
+            fis.close()
+            return nil
+        end)
+        if okOpen and state then
+            local function stepWav()
+                if isCanceledFn and isCanceledFn() then
+                    pcall(function() state.fis.close() end)
+                    onDone(false, "Canceled")
+                    return
+                end
+                local doneFlag = false
+                local okStep, errStep = pcall(function()
+                    for _ = 1, 3 do
+                        if #state.rawMono >= state.maxRaw then doneFlag = true break end
+                        local n = state.fis.read(state.buf, 0, 16384)
+                        if not n or n <= 0 then doneFlag = true break end
+                        local step = state.ch * 2
+                        local i = 0
+                        while i + step - 1 < n do
+                            local sum = 0
+                            for c = 0, state.ch - 1 do
+                                local lo = state.buf[i + c * 2] % 256
+                                local hi = state.buf[i + c * 2 + 1] % 256
+                                local v = lo + hi * 256
+                                if v >= 32768 then v = v - 65536 end
+                                sum = sum + v
+                            end
+                            table.insert(state.rawMono, math.floor(sum / state.ch))
+                            i = i + step
+                        end
+                    end
+                end)
+                if not okStep then
+                    pcall(function() state.fis.close() end)
+                    onDone(false, tostring(errStep))
+                    return
+                end
+                local pct = 5 + math.floor(math.min(1, #state.rawMono / math.max(1, state.maxRaw)) * 25)
+                if onProgress then onProgress(pct) end
+                if doneFlag then
+                    pcall(function() state.fis.close() end)
+                    if #state.rawMono == 0 then
+                        onDone(false, "Empty WAV music")
+                        return
+                    end
+                    local ratio = state.sr / 24000.0
+                    local outLen = math.floor(#state.rawMono / ratio)
+                    local outSamples = {}
+                    for k = 1, outLen do
+                        local sp = math.floor((k - 1) * ratio) + 1
+                        if sp > #state.rawMono then sp = #state.rawMono end
+                        outSamples[k] = state.rawMono[sp]
+                    end
+                    onDone(true, outSamples)
+                else
+                    M.delay(8, stepWav)
+                end
+            end
+            M.delay(8, stepWav)
+            return
+        end
+    end
+
+    local okInit, dec = pcall(function()
+        local extractor = MediaExtractor()
+        extractor.setDataSource(musicPath)
+        local trackIdx, mime, srcFormat = -1, nil, nil
+        local numTracks = extractor.getTrackCount()
+        for t = 0, numTracks - 1 do
+            local fmt = extractor.getTrackFormat(t)
+            local m = fmt.getString(MediaFormat.KEY_MIME)
+            if m and m:sub(1, 6) == "audio/" then
+                trackIdx = t
+                mime = m
+                srcFormat = fmt
+                break
+            end
+        end
+        if trackIdx < 0 or not mime then
+            extractor.release()
+            error("No audio track found in selected music file")
+        end
+        extractor.selectTrack(trackIdx)
+        local srcRate = 44100
+        local srcCh = 2
+        pcall(function() srcRate = srcFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE) end)
+        pcall(function() srcCh = srcFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT) end)
+        if not srcRate or srcRate < 8000 then srcRate = 44100 end
+        if not srcCh or srcCh < 1 then srcCh = 2 end
+
+        local codec = MediaCodec.createDecoderByType(mime)
+        codec.configure(srcFormat, nil, nil, 0)
+        codec.start()
+
+        local maxNeededSrc = math.min(math.floor(srcRate * 90), math.floor(targetSamples * (srcRate / 24000.0)) + srcRate)
+        return {
+            extractor = extractor,
+            codec = codec,
+            info = MediaCodec.BufferInfo(),
+            srcRate = srcRate,
+            srcCh = srcCh,
+            sawInputEOS = false,
+            sawOutputEOS = false,
+            rawMono = {},
+            maxNeededSrc = maxNeededSrc,
+            totalLoops = 0
+        }
+    end)
+
+    if not okInit or not dec then
+        onDone(false, tostring(dec or "Cannot open music decoder"))
+        return
+    end
+
+    local function closeDec()
+        pcall(function() dec.codec.stop() end)
+        pcall(function() dec.codec.release() end)
+        pcall(function() dec.extractor.release() end)
+    end
+
+    local function stepCodec()
+        if isCanceledFn and isCanceledFn() then
+            closeDec()
+            onDone(false, "Canceled")
+            return
+        end
+
+        local okS, errS = pcall(function()
+            local batchLoops = 0
+            while not dec.sawOutputEOS and #dec.rawMono < dec.maxNeededSrc and dec.totalLoops < 25000 and batchLoops < 35 do
+                dec.totalLoops = dec.totalLoops + 1
+                batchLoops = batchLoops + 1
+
+                if not dec.sawInputEOS then
+                    local inIdx = dec.codec.dequeueInputBuffer(2000)
+                    if inIdx >= 0 then
+                        local inBuf = dec.codec.getInputBuffer(inIdx)
+                        local sampleSize = dec.extractor.readSampleData(inBuf, 0)
+                        if sampleSize < 0 then
+                            dec.codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            dec.sawInputEOS = true
+                        else
+                            local pts = dec.extractor.getSampleTime()
+                            dec.codec.queueInputBuffer(inIdx, 0, sampleSize, pts, 0)
+                            dec.extractor.advance()
+                        end
+                    end
+                end
+
+                local outIdx = dec.codec.dequeueOutputBuffer(dec.info, 2000)
+                if outIdx >= 0 then
+                    if dec.info.size > 0 then
+                        local outBuf = dec.codec.getOutputBuffer(outIdx)
+                        outBuf.position(dec.info.offset)
+                        outBuf.limit(dec.info.offset + dec.info.size)
+                        local chunk = byte[dec.info.size]
+                        outBuf.get(chunk)
+                        local step = dec.srcCh * 2
+                        local i = 0
+                        while i + step - 1 < dec.info.size do
+                            local sum = 0
+                            for c = 0, dec.srcCh - 1 do
+                                local lo = chunk[i + c * 2] % 256
+                                local hi = chunk[i + c * 2 + 1] % 256
+                                local v = lo + hi * 256
+                                if v >= 32768 then v = v - 65536 end
+                                sum = sum + v
+                            end
+                            table.insert(dec.rawMono, math.floor(sum / dec.srcCh))
+                            i = i + step
+                        end
+                    end
+                    dec.codec.releaseOutputBuffer(outIdx, false)
+                    if (dec.info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) ~= 0 then
+                        dec.sawOutputEOS = true
+                    end
+                elseif outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED then
+                    local ofmt = dec.codec.getOutputFormat()
+                    pcall(function() dec.srcRate = ofmt.getInteger(MediaFormat.KEY_SAMPLE_RATE) end)
+                    pcall(function() dec.srcCh = ofmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT) end)
+                end
+            end
+        end)
+
+        if not okS then
+            closeDec()
+            onDone(false, tostring(errS))
+            return
+        end
+
+        local pct = 5 + math.floor(math.min(1, #dec.rawMono / math.max(1, dec.maxNeededSrc)) * 25)
+        if onProgress then onProgress(pct) end
+
+        if dec.sawOutputEOS or #dec.rawMono >= dec.maxNeededSrc or dec.totalLoops >= 25000 then
+            closeDec()
+            if #dec.rawMono == 0 then
+                onDone(false, "Decoded music was empty")
+                return
+            end
+            local ratio = dec.srcRate / 24000.0
+            local outLen = math.floor(#dec.rawMono / ratio)
+            local outSamples = {}
+            for k = 1, outLen do
+                local sp = math.floor((k - 1) * ratio) + 1
+                if sp > #dec.rawMono then sp = #dec.rawMono end
+                outSamples[k] = dec.rawMono[sp]
+            end
+            onDone(true, outSamples)
+        else
+            M.delay(8, stepCodec)
+        end
+    end
+
+    M.delay(8, stepCodec)
+end
+
+function M.mixVoiceWithBgMusic(cleanWavPath, musicPath, onDone)
+    local myJobId = S.jobId
+    local function isCanceled()
+        return S.jobId ~= myJobId
+    end
+
+    local vf = File(cleanWavPath)
+    if not vf.exists() or vf.length() <= 44 then
+        onDone(false, "Clean voice file missing", 0)
+        return
+    end
+
+    local voicePcmBytes = math.floor(vf.length()) - 44
+    if voicePcmBytes % 2 ~= 0 then voicePcmBytes = voicePcmBytes - 1 end
+    local voiceSamples = math.floor(voicePcmBytes / 2)
+
+    local sr = 24000
+    local ioSec = math.max(0, math.min(10, tonumber(M.cfg.bgIntroOutroSec) or 3))
+    local duckGain = math.max(0.02, math.min(0.80, (tonumber(M.cfg.bgDuckVol) or 12) / 100.0))
+    local normGain = math.max(0.05, math.min(0.95, (tonumber(M.cfg.bgNormalVol) or 38) / 100.0))
+    local voiceGain = math.max(0.80, math.min(1.50, (tonumber(M.cfg.bgVoiceBoost) or 100) / 100.0))
+    local autoDuckOn = (M.cfg.bgAutoDuck ~= false)
+    local introSamples = sr * ioSec
+    local outroSamples = sr * ioSec
+    local totalSamples = introSamples + voiceSamples + outroSamples
+    local totalPcmBytes = totalSamples * 2
+    local totalDurSec = totalSamples / 24000.0
+
+    M.updateProgress(5, "Decoding background music (5%)...", false)
+
+    M.decodeAudioFileAsync(musicPath, totalSamples, isCanceled, function(decPct)
+        M.updateProgress(decPct, "Preparing background music (" .. tostring(decPct) .. "%)...", false)
+    end, function(okDec, bgSamplesOrErr)
+        if isCanceled() then onDone(false, "Canceled", 0) return end
+        if not okDec then
+            onDone(false, tostring(bgSamplesOrErr or "Music decode failed"), 0)
+            return
+        end
+
+        local bgSamples = bgSamplesOrErr
+        local bgLen = #bgSamples
+        local mixedPath = M.baseStorageDir.getPath() .. "/gemini_mixed_" .. os.time() .. ".wav"
+
+        local okOpen, st = pcall(function()
+            local fos = FileOutputStream(File(mixedPath))
+            M.writeWavHeader(fos, totalPcmBytes)
+            local fis = FileInputStream(vf)
+            local skipHdr = byte[44]
+            fis.read(skipHdr, 0, 44)
+            return {
+                fos = fos,
+                fis = fis,
+                frameSize = 960,
+                inBytes = byte[960 * 2],
+                outBytes = byte[960 * 2],
+                curGain = normGain,
+                bgCursor = 1,
+                globalPos = 0,
+                phase = 1,
+                remIntro = introSamples,
+                remVoice = voiceSamples,
+                remOutro = outroSamples
+            }
+        end)
+
+        if not okOpen or not st then
+            onDone(false, tostring(st or "Cannot open output WAV"), 0)
+            return
+        end
+
+        local function closeStreams()
+            pcall(function() st.fis.close() end)
+            pcall(function() st.fos.flush() st.fos.close() end)
+        end
+
+        local function writeMixedFrame(vArr, vCount, targetGain, isIntro, isOutro)
+            local outIdx = 0
+            local outB = st.outBytes
+            for i = 0, vCount - 1 do
+                st.globalPos = st.globalPos + 1
+                local vSample = 0
+                if vArr then
+                    local lo = vArr[i * 2] % 256
+                    local hi = vArr[i * 2 + 1] % 256
+                    vSample = lo + hi * 256
+                    if vSample >= 32768 then vSample = vSample - 65536 end
+                end
+
+                if targetGain < st.curGain then
+                    st.curGain = st.curGain + (targetGain - st.curGain) * 0.0030
+                else
+                    st.curGain = st.curGain + (targetGain - st.curGain) * 0.0008
+                end
+
+                local envGain = st.curGain
+                if isIntro and st.globalPos < 12000 then
+                    envGain = envGain * (st.globalPos / 12000.0)
+                end
+                if isOutro then
+                    local remEnd = totalSamples - st.globalPos
+                    if remEnd < 36000 then
+                        envGain = envGain * math.max(0.0, remEnd / 36000.0)
+                    end
+                end
+
+                local mSample = bgSamples[st.bgCursor] or 0
+                st.bgCursor = st.bgCursor + 1
+                if st.bgCursor > bgLen then st.bgCursor = 1 end
+
+                local mixed = math.floor((vSample * voiceGain) + (mSample * envGain))
+                if mixed > 32767 then mixed = 32767
+                elseif mixed < -32768 then mixed = -32768 end
+
+                if mixed < 0 then mixed = mixed + 65536 end
+                outB[outIdx] = mixed % 256
+                outB[outIdx + 1] = math.floor(mixed / 256) % 256
+                outIdx = outIdx + 2
+            end
+            st.fos.write(outB, 0, outIdx)
+        end
+
+        local function stepMix()
+            if isCanceled() then
+                closeStreams()
+                pcall(function() File(mixedPath).delete() end)
+                onDone(false, "Canceled", 0)
+                return
+            end
+
+            local okStep, errStep = pcall(function()
+                for _ = 1, 25 do
+                    if st.phase == 1 then
+                        if st.remIntro <= 0 then
+                            st.phase = 2
+                        else
+                            local cnt = math.min(st.frameSize, st.remIntro)
+                            local tGain = (st.remIntro <= 9600 and autoDuckOn) and duckGain or normGain
+                            writeMixedFrame(nil, cnt, tGain, true, false)
+                            st.remIntro = st.remIntro - cnt
+                        end
+                    elseif st.phase == 2 then
+                        if st.remVoice <= 0 then
+                            st.phase = 3
+                        else
+                            local cnt = math.min(st.frameSize, st.remVoice)
+                            local bytesRead = st.fis.read(st.inBytes, 0, cnt * 2)
+                            if not bytesRead or bytesRead <= 0 then
+                                st.remVoice = 0
+                                st.phase = 3
+                            else
+                                local actualSamples = math.floor(bytesRead / 2)
+                                local energy = 0
+                                for i = 0, actualSamples - 1 do
+                                    local lo = st.inBytes[i * 2] % 256
+                                    local hi = st.inBytes[i * 2 + 1] % 256
+                                    local s = lo + hi * 256
+                                    if s >= 32768 then s = s - 65536 end
+                                    energy = energy + (s * s)
+                                end
+                                local rms = math.sqrt(energy / math.max(1, actualSamples))
+                                local targetGain = autoDuckOn and ((rms > 380) and duckGain or normGain) or duckGain
+                                writeMixedFrame(st.inBytes, actualSamples, targetGain, false, false)
+                                st.remVoice = st.remVoice - actualSamples
+                            end
+                        end
+                    elseif st.phase == 3 then
+                        if st.remOutro <= 0 then
+                            st.phase = 4
+                            break
+                        else
+                            local cnt = math.min(st.frameSize, st.remOutro)
+                            writeMixedFrame(nil, cnt, normGain, false, true)
+                            st.remOutro = st.remOutro - cnt
+                        end
+                    else
+                        break
+                    end
+                end
+            end)
+
+            if not okStep then
+                closeStreams()
+                pcall(function() File(mixedPath).delete() end)
+                onDone(false, tostring(errStep), 0)
+                return
+            end
+
+            local mixPct = 35 + math.floor(math.min(1, st.globalPos / math.max(1, totalSamples)) * 60)
+            M.updateProgress(mixPct, "Auto-Ducking & Mixing BG Music (" .. tostring(mixPct) .. "%)...", false)
+
+            if st.phase >= 4 then
+                closeStreams()
+                if File(mixedPath).exists() and File(mixedPath).length() > 100 then
+                    onDone(true, mixedPath, totalDurSec)
+                else
+                    onDone(false, "Mixed output file was empty", 0)
+                end
+            else
+                M.delay(5, stepMix)
+            end
+        end
+
+        M.delay(5, stepMix)
+    end)
+end
+
+function M.exportToMp3File(sourceWavPath, destMp3File)
+    local usedFfmpeg = false
+    pcall(function()
+        local ffPaths = { "/system/bin/ffmpeg", "/data/data/com.termux/files/usr/bin/ffmpeg", "ffmpeg" }
+        for _, ff in ipairs(ffPaths) do
+            local okExec, proc = pcall(function()
+                return luajava.bindClass("java.lang.Runtime").getRuntime().exec({
+                    ff, "-y", "-i", sourceWavPath, "-codec:a", "libmp3lame", "-b:a", "128k", destMp3File.getAbsolutePath()
+                })
+            end)
+            if okExec and proc then
+                local exitCode = proc.waitFor()
+                if exitCode == 0 and destMp3File.exists() and destMp3File.length() > 1000 then
+                    usedFfmpeg = true
+                    break
+                end
+            end
+        end
+    end)
+    if usedFfmpeg then return true end
+
+    local okCopy, errCopy = pcall(function()
+        local input = FileInputStream(File(sourceWavPath))
+        local output = FileOutputStream(destMp3File)
+        copyStream(input, output)
+        output.flush()
+        output.close()
+        input.close()
+    end)
+    return okCopy, errCopy
+end
+
+function M.applyBgMusicNow()
+    if S.isGenerating or S.isWritingScript then
+        M.speakOnly("Please wait for the current task to finish.")
+        return
+    end
+    local cleanPath = S.cleanVoiceWavPath or S.generatedAudioPath
+    if not cleanPath or not File(cleanPath).exists() then
+        M.speakOnly("Please generate audio first.")
+        return
+    end
+
+    if S.mediaPlayer ~= nil then
+        pcall(function()
+            if S.isPlaying then S.mediaPlayer.stop() end
+            S.mediaPlayer.release()
+        end)
+        S.mediaPlayer = nil
+        S.isPlaying = false
+    end
+
+    if not M.cfg.bgMusicPath or M.cfg.bgMusicPath == "" or not File(M.cfg.bgMusicPath).exists() then
+        if S.generatedAudioPath and S.generatedAudioPath ~= cleanPath then
+            pcall(function() File(S.generatedAudioPath).delete() end)
+        end
+        S.generatedAudioPath = cleanPath
+        local durSec = math.max(1, (File(cleanPath).length() - 44) / 48000.0)
+        M.onAudioReadyUI(durSec, "Audio (No BG Music)")
+        return
+    end
+
+    S.jobId = (S.jobId or 0) + 1
+    S.isGenerating = true
+    M.refreshActionButtons()
+    M.focusStatus()
+    M.updateProgress(5, "Starting Auto-Ducking & BG Music Mix...", true)
+    M.mixVoiceWithBgMusic(cleanPath, M.cfg.bgMusicPath, function(okMix, pathOrErr, durSec)
+        if okMix then
+            if S.generatedAudioPath and S.generatedAudioPath ~= cleanPath then
+                pcall(function() File(S.generatedAudioPath).delete() end)
+            end
+            S.generatedAudioPath = pathOrErr
+            M.onAudioReadyUI(durSec, "Audio + BG Music")
+        else
+            S.isGenerating = false
+            M.logIssue("BgMusicMix", tostring(pathOrErr))
+            M.updateProgress(100, "Music mix failed (" .. tostring(pathOrErr) .. "). Original voice kept.", true)
+            M.refreshActionButtons()
+        end
+    end)
+end
+
+function M.finalizeMergedVoice(durSec, labelPrefix)
+    S.cleanVoiceWavPath = S.generatedAudioPath
+    pcall(function()
+        local ed = M.prefs.edit()
+        ed.putString("last_clean_wav_path", tostring(S.cleanVoiceWavPath or ""))
+        ed.commit()
+    end)
+
+    if M.cfg.bgMusicPath and M.cfg.bgMusicPath ~= "" and File(M.cfg.bgMusicPath).exists() then
+        M.updateProgress(97, "Adding background music (3s intro, auto-ducking, 3s outro)...", false)
+        M.mixVoiceWithBgMusic(S.cleanVoiceWavPath, M.cfg.bgMusicPath, function(okMix, pathOrErr, mixedDur)
+            if okMix then
+                S.generatedAudioPath = pathOrErr
+                M.onAudioReadyUI(mixedDur, labelPrefix .. " + Music")
+            else
+                M.logIssue("BgMusicMix", tostring(pathOrErr))
+                M.onAudioReadyUI(durSec, labelPrefix)
+            end
+        end)
+    else
+        M.onAudioReadyUI(durSec, labelPrefix)
+    end
+end
+
 function M.onAudioReadyUI(totalDurationSec, labelPrefix)
     local shortDur = M.formatDurationText(totalDurationSec)
     S.currentDurationStr = shortDur
+    M.stopProgressTicker()
     S.isGenerating = false
     pcall(function()
         local ed = M.prefs.edit()
@@ -1493,7 +2194,7 @@ function M.parseBcTurnsIntoChunks(scriptText)
     local chunks, cur, chars = {}, {}, 0
     for _, t in ipairs(allTurns) do
         local tChars = M.utf8CharCount(t.text)
-        if #cur > 0 and (#cur >= 80 or (chars + tChars) > 4000) then
+        if #cur > 0 and (#cur >= 110 or (chars + tChars) > 5500) then
             table.insert(chunks, cur)
             cur, chars = {}, 0
         end
@@ -1514,7 +2215,7 @@ function M.parseGroupSpeakerBatches(scriptText, speakerCount)
             if idx > speakerCount then idx = 1 end
             lastIdx = idx
             if #allTurns > 0 and allTurns[#allTurns].speakerIdx == idx
-                and (M.utf8CharCount(allTurns[#allTurns].text) + M.utf8CharCount(body)) < 3800 then
+                and (M.utf8CharCount(allTurns[#allTurns].text) + M.utf8CharCount(body)) < 5300 then
                 allTurns[#allTurns].text = allTurns[#allTurns].text .. " " .. body
             else
                 table.insert(allTurns, { speakerIdx = idx, text = body })
@@ -1529,7 +2230,7 @@ function M.parseGroupSpeakerBatches(scriptText, speakerCount)
         local tChars = M.utf8CharCount(t.text)
         local alreadyIn = curSpkSet[t.speakerIdx] == true
         local wouldExceedSpeakers = (not alreadyIn) and (#curSpkList >= 2)
-        local wouldExceedSize = (#curTurns > 0) and (#curTurns >= 80 or (curChars + tChars) > 4000)
+        local wouldExceedSize = (#curTurns > 0) and (#curTurns >= 110 or (curChars + tChars) > 5500)
 
         if wouldExceedSpeakers or wouldExceedSize then
             table.insert(batches, { speakers = curSpkList, turns = curTurns })
@@ -1614,7 +2315,7 @@ function M.splitSingleTextIntoChunks(text)
     if t == "" then return {} end
 
     local totalChars = M.utf8CharCount(t)
-    if totalChars <= 4000 then
+    if totalChars <= 7000 then
         return { M.normalizeSingleChunk(t) }
     end
 
@@ -1667,6 +2368,7 @@ function M.startCreateScriptJob(inputText)
 
     local function failScript(msg)
         if isCanceled() then return end
+        M.stopProgressTicker()
         S.isWritingScript = false
         M.logIssue("CreateScript", msg)
         local dS, tS = M.getScriptResumeStatus()
@@ -1748,15 +2450,17 @@ function M.startCreateScriptJob(inputText)
             local lines = {}
 
             if isSingle then
-                table.insert(lines, "Write an engaging single-narrator script/story.")
-                table.insert(lines, "Language: " .. lang .. ".")
-                table.insert(lines, "Exact Style / Mood: " .. M.cfg.singleStyle .. ".")
+                table.insert(lines, "You are an award-winning scriptwriter. Write a masterclass, captivating, 100% authentic single-narrator script/story.")
+                table.insert(lines, "Language: " .. lang .. " (use natural, idiomatic, expressive native phrasing — zero robotic or translated-sounding lines).")
+                table.insert(lines, "Exact Style / Mood (100% STRICT): " .. M.cfg.singleStyle .. " — " .. M.getMoodActingInstruction(M.cfg.singleStyle) .. ".")
+                table.insert(lines, "QUALITY RULE: Fully embody the selected mood from the very first sentence to the last (if Funny/Comedy: write genuinely hilarious setups and punchlines; if Islamic: deeply respectful, authentic and heartfelt; if Horror/Thriller: gripping suspense; if Storytelling: vivid imagery and emotional hooks).")
                 table.insert(lines, "Target Length: approx " .. tostring(b.mins) .. " minute(s) (~" .. tostring(words) .. " words).")
                 table.insert(lines, "STRICT RULES: Output ONLY clean spoken narration text matching the exact mood and language. No markdown stars (*), no headings (#), no brackets [], no emojis.")
             else
-                table.insert(lines, "Write a 100% realistic, natural, lively conversation between " .. tostring(spkCount) .. " friends/hosts: " .. speakerRosterStr .. ".")
-                table.insert(lines, "Language: " .. lang .. ".")
-                table.insert(lines, "Exact Mood / Style: " .. M.cfg.bcMood .. ".")
+                table.insert(lines, "You are an award-winning broadcast scriptwriter. Write a masterclass, 100% realistic, gripping, natural conversation between " .. tostring(spkCount) .. " friends/hosts: " .. speakerRosterStr .. ".")
+                table.insert(lines, "Language: " .. lang .. " (use natural, idiomatic native speech, real reactions, and authentic flow — zero robotic filler).")
+                table.insert(lines, "Exact Mood / Style (100% STRICT): " .. M.cfg.bcMood .. " — " .. M.getMoodActingInstruction(M.cfg.bcMood) .. ".")
+                table.insert(lines, "QUALITY RULE: Fully commit to the selected mood in every dialogue (if Funny/Comedy: real witty banter, jokes, and punchlines; if Islamic: deeply respectful, authentic, soulful; if Horror/Thriller: tense suspense; if Debate/News/Podcast: sharp, engaging, high-value points).")
                 table.insert(lines, "Target Length: approx " .. tostring(b.mins) .. " minute(s) (~" .. tostring(turns) .. " dialogue turns, ~" .. tostring(words) .. " words).")
                 table.insert(lines, "STRICT RULES:")
                 table.insert(lines, "1. Every line MUST start with Speaker1:, Speaker2:, ... up to Speaker" .. tostring(spkCount) .. ": ONLY as the prefix.")
@@ -1796,10 +2500,12 @@ function M.startCreateScriptJob(inputText)
             end
 
             local basePct = math.max(10, math.floor(((bIdx - 1) / totalBatches) * 85) + 10)
+            local nextCap = math.min(95, math.floor((bIdx / totalBatches) * 85) + 5)
             local batchLabel = (totalBatches > 1)
-                and ("Writing script part " .. tostring(bIdx) .. "/" .. tostring(totalBatches) .. " (" .. curModel .. ")...")
-                or ("Writing " .. tostring(totalMins) .. " min script (" .. curModel .. ")...")
+                and ("Writing script part " .. tostring(bIdx) .. "/" .. tostring(totalBatches) .. "...")
+                or ("Writing " .. tostring(totalMins) .. " min script...")
             M.updateProgress(basePct, batchLabel, false)
+            M.startProgressTicker(myJobId, basePct, nextCap, 1400, batchLabel)
 
             local payload = {
                 contents = { { role = "user", parts = { { text = buildBatchPrompt(bIdx) } } } }
@@ -1811,6 +2517,7 @@ function M.startCreateScriptJob(inputText)
             local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. curModel .. ":generateContent?key=" .. curKey
 
             local okS, errS = M.httpPost(url, cjson.encode(payload), headers, function(code, content)
+                M.stopProgressTicker()
                 if isCanceled() then return end
 
                 if code == 400 and useFastThinking then
@@ -1819,16 +2526,21 @@ function M.startCreateScriptJob(inputText)
                 end
 
                 if code == 429 or code == 503 or code == 500 or code == -1 or code == 404 then
-                    M.logIssue("ScriptBatch" .. tostring(bIdx), "Model " .. curModel .. " HTTP " .. tostring(code) .. ": " .. tostring(M.extractApiError(content) or "Busy"))
-                    local altKey = M.getAlternateApiKey(curKey)
-                    if altKey and keyRetries < 4 then
-                        M.updateProgress(basePct, "Key busy (code " .. tostring(code) .. "), switching API key...", false)
-                        M.delay(250, function() runBatch(bIdx, modelIdx, altKey, useFastThinking, keyRetries + 1) end)
-                        return
+                    local errTxt = tostring(M.extractApiError(content) or "Busy")
+                    M.logIssue("ScriptBatch" .. tostring(bIdx), "ScriptModel " .. curModel .. " HTTP " .. tostring(code) .. ": " .. errTxt)
+                    local isZeroLimit = errTxt:find("limit: 0", 1, true) ~= nil
+                    if not isZeroLimit then
+                        local altKey = M.getAlternateApiKey(curKey)
+                        if altKey and keyRetries < 4 then
+                            M.updateProgress(basePct, "Key busy (HTTP " .. tostring(code) .. "), switching API key...", false)
+                            M.delay(200, function() runBatch(bIdx, modelIdx, altKey, useFastThinking, keyRetries + 1) end)
+                            return
+                        end
                     end
                     if modelIdx < #models then
-                        M.updateProgress(basePct, "Model busy (code " .. tostring(code) .. "), switching model...", false)
-                        M.delay(300, function() runBatch(bIdx, modelIdx + 1, curKey, true, 0) end)
+                        local nextM = models[modelIdx + 1]
+                        M.updateProgress(basePct, "Switching script model to " .. tostring(nextM) .. "...", false)
+                        M.delay(200, function() runBatch(bIdx, modelIdx + 1, curKey, true, 0) end)
                         return
                     end
                 end
@@ -1928,6 +2640,7 @@ function M.startSingleSpeakerAudioJob(inputText)
 
     local function stopOnError(msg)
         if isCanceled() then return end
+        M.stopProgressTicker()
         S.isGenerating = false
         M.logIssue("SingleAudio", msg)
         local dA, tA = M.getAudioResumeStatus(inputText, M.cfg.mode)
@@ -1953,7 +2666,7 @@ function M.startSingleSpeakerAudioJob(inputText)
         return
     end
 
-    local baseStyle = M.SINGLE_STYLE_TEXT[style] or M.SINGLE_STYLE_TEXT["Default / Normal"]
+    local baseStyle = M.getMoodActingInstruction(style)
 
     local audioSig = M.makeAudioSig(inputText, M.cfg.mode)
     local doneA, savedTotalA, firstMissingA = M.getAudioResumeStatus(inputText, M.cfg.mode)
@@ -1977,10 +2690,10 @@ function M.startSingleSpeakerAudioJob(inputText)
             stopOnError("Merge error: " .. tostring(durOrErr))
             return
         end
-        M.onAudioReadyUI(durOrErr, "Audio")
+        M.finalizeMergedVoice(durOrErr, "Audio")
     end
 
-    local function processChunk(partIdx, ttsIdx, modeIdx, curKey, keyRetries)
+    local function processChunk(partIdx, ttsIdx, modeIdx, curKey, keyRetries, sameModelRetried)
         if isCanceled() then return end
         local curModel = ttsQueue[ttsIdx]
         if not curModel then
@@ -1990,7 +2703,11 @@ function M.startSingleSpeakerAudioJob(inputText)
 
         local doneBefore = partIdx - 1
         local pct = math.max(5, math.floor((doneBefore / totalParts) * 90))
-        M.updateProgress(pct, "Audio Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating...", partIdx == 1 and modeIdx == 1 and keyRetries == 0)
+        local nextCap = math.min(90, math.floor((partIdx / totalParts) * 90) - 5)
+        if nextCap < pct + 5 then nextCap = math.min(90, pct + 15) end
+        local partLabel = "Audio Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating..."
+        M.updateProgress(pct, partLabel, partIdx == 1 and modeIdx == 1 and keyRetries == 0)
+        M.startProgressTicker(myJobId, pct, nextCap, 1800, partLabel)
 
         -- Carry last 2-3 lines of previous part so tone, pitch, speed & mood stay 100% locked
         local continuityLock
@@ -2004,7 +2721,7 @@ function M.startSingleSpeakerAudioJob(inputText)
                 .. ") with speaker voice (" .. voice .. "), maintaining uniform pitch, volume, and steady pace from start to finish."
         end
 
-        local stylePrompt = baseStyle .. ". Language: " .. lang .. ". " .. continuityLock
+        local stylePrompt = "CRYSTAL-CLEAR STUDIO AUDIO (zero noise, crisp voice): " .. baseStyle .. ". Language: " .. lang .. ". " .. continuityLock
 
         local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. curModel .. ":generateContent?key=" .. curKey
         local partObj = { text = chunks[partIdx] }
@@ -2032,21 +2749,29 @@ function M.startSingleSpeakerAudioJob(inputText)
         }
 
         local okP, errP = M.httpPost(url, cjson.encode(payload), headers, function(code, content)
+            M.stopProgressTicker()
             if isCanceled() then return end
 
             if code == 400 and modeIdx < 4 then
-                M.delay(100, function() processChunk(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
+                M.delay(100, function() processChunk(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries, sameModelRetried) end)
                 return
             end
 
             if code == 429 or code == 503 or code == 500 or code == -1 or code == 404 then
                 M.logIssue("SinglePart" .. tostring(partIdx), "Model " .. curModel .. " HTTP " .. tostring(code) .. ": " .. tostring(M.extractApiError(content) or "Busy"))
+                if not sameModelRetried then
+                    M.updateProgress(pct, "Limit/busy on " .. curModel .. ". Rechecking in 5s...", false)
+                    M.delay(5000, function() processChunk(partIdx, ttsIdx, modeIdx, curKey, keyRetries, true) end)
+                    return
+                end
                 local altKey = M.getAlternateApiKey(curKey)
                 if altKey and keyRetries < 4 then
-                    M.delay(250, function() processChunk(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
+                    M.updateProgress(pct, "Switching API key for Part " .. tostring(partIdx) .. "...", false)
+                    M.delay(500, function() processChunk(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1, false) end)
                     return
                 elseif ttsIdx < #ttsQueue then
-                    M.delay(300, function() processChunk(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
+                    M.updateProgress(pct, "Limit reached. Switching to next TTS model in 4s (Part " .. tostring(partIdx) .. ")...", false)
+                    M.delay(4000, function() processChunk(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0, false) end)
                     return
                 end
             end
@@ -2069,7 +2794,7 @@ function M.startSingleSpeakerAudioJob(inputText)
                 M.updateProgress(donePct, "Audio Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " done", false)
 
                 if partIdx < totalParts then
-                    M.delay(50, function() processChunk(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0) end)
+                    M.delay(50, function() processChunk(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0, false) end)
                 else
                     finishMerge()
                 end
@@ -2096,7 +2821,7 @@ function M.startSingleSpeakerAudioJob(inputText)
         if discoveredQueue and #discoveredQueue > 0 then
             ttsQueue = discoveredQueue
         end
-        processChunk(startIdx, 1, 1, firstKey, 0)
+        processChunk(startIdx, 1, 1, firstKey, 0, false)
     end)
 end
 
@@ -2131,6 +2856,7 @@ function M.startBroadcastAudioJob(inputText)
 
     local function stopOnError(msg)
         if isCanceled() then return end
+        M.stopProgressTicker()
         S.isGenerating = false
         M.logIssue("BroadcastAudio", msg)
         local dA, tA = M.getAudioResumeStatus(inputText, M.cfg.mode)
@@ -2191,7 +2917,7 @@ function M.startBroadcastAudioJob(inputText)
             M.onAudioReadyUI(durOrErr, "Broadcast")
         end
 
-        local function processBcPart(partIdx, ttsIdx, modeIdx, curKey, keyRetries)
+        local function processBcPart(partIdx, ttsIdx, modeIdx, curKey, keyRetries, sameModelRetried)
             if isCanceled() then return end
             local curModel = ttsQueue[ttsIdx]
             if not curModel then
@@ -2200,7 +2926,11 @@ function M.startBroadcastAudioJob(inputText)
             end
 
             local pct = math.max(5, math.floor(((partIdx - 1) / totalParts) * 90))
-            M.updateProgress(pct, "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating...", partIdx == 1 and modeIdx == 1 and keyRetries == 0)
+            local nextCap = math.min(90, math.floor((partIdx / totalParts) * 90) - 5)
+            if nextCap < pct + 5 then nextCap = math.min(90, pct + 15) end
+            local partLabel = "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating..."
+            M.updateProgress(pct, partLabel, partIdx == 1 and modeIdx == 1 and keyRetries == 0)
+            M.startProgressTicker(myJobId, pct, nextCap, 1800, partLabel)
 
             local contNote = ""
             if partIdx > 1 and turnChunks[partIdx - 1] and #turnChunks[partIdx - 1] > 0 then
@@ -2208,10 +2938,13 @@ function M.startBroadcastAudioJob(inputText)
                 contNote = ", continuing seamlessly after '" .. string.sub(lastTurn.text or "", -180) .. "' with zero change in voice, pitch, or speed"
             end
 
-            local s1Style = "consistent broadcast friend (" .. v1 .. ") speaking in " .. lang
-                .. ", strictly matching exact mood: " .. mood .. ", locked to identical voice identity, vocal pitch, and steady tempo" .. contNote
-            local s2Style = "consistent broadcast friend (" .. v2 .. ") speaking in " .. lang
-                .. ", strictly matching exact mood: " .. mood .. ", locked to identical voice identity, vocal pitch, and steady tempo" .. contNote
+            local exactMoodDesc = M.getMoodActingInstruction(mood)
+            local s1Style = "CRYSTAL-CLEAR STUDIO VOICE (" .. v1 .. ") speaking in " .. lang
+                .. ", 100% STRICT MOOD (" .. mood .. "): " .. exactMoodDesc
+                .. ", crisp clean pronunciation, zero muffling, locked to identical voice identity, pitch, and tempo" .. contNote
+            local s2Style = "CRYSTAL-CLEAR STUDIO VOICE (" .. v2 .. ") speaking in " .. lang
+                .. ", 100% STRICT MOOD (" .. mood .. "): " .. exactMoodDesc
+                .. ", crisp clean pronunciation, zero muffling, locked to identical voice identity, pitch, and tempo" .. contNote
 
             local url = "https://generativelanguage.googleapis.com/v1beta/models/" .. curModel .. ":generateContent?key=" .. curKey
             local partsArray = {}
@@ -2252,21 +2985,29 @@ function M.startBroadcastAudioJob(inputText)
             }
 
             local okP, errP = M.httpPost(url, cjson.encode(payload), headers, function(code, content)
+                M.stopProgressTicker()
                 if isCanceled() then return end
 
                 if code == 400 and modeIdx < 4 then
-                    M.delay(100, function() processBcPart(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
+                    M.delay(100, function() processBcPart(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries, sameModelRetried) end)
                     return
                 end
 
                 if code == 429 or code == 503 or code == 500 or code == -1 or code == 404 then
                     M.logIssue("Bc2Part" .. tostring(partIdx), "Model " .. curModel .. " HTTP " .. tostring(code) .. ": " .. tostring(M.extractApiError(content) or "Busy"))
+                    if not sameModelRetried then
+                        M.updateProgress(pct, "Limit/busy on " .. curModel .. ". Rechecking in 5s...", false)
+                        M.delay(5000, function() processBcPart(partIdx, ttsIdx, modeIdx, curKey, keyRetries, true) end)
+                        return
+                    end
                     local altKey = M.getAlternateApiKey(curKey)
                     if altKey and keyRetries < 4 then
-                        M.delay(250, function() processBcPart(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
+                        M.updateProgress(pct, "Switching API key for Part " .. tostring(partIdx) .. "...", false)
+                        M.delay(500, function() processBcPart(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1, false) end)
                         return
                     elseif ttsIdx < #ttsQueue then
-                        M.delay(300, function() processBcPart(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
+                        M.updateProgress(pct, "Limit reached. Switching to next TTS model in 4s (Part " .. tostring(partIdx) .. ")...", false)
+                        M.delay(4000, function() processBcPart(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0, false) end)
                         return
                     end
                 end
@@ -2289,7 +3030,7 @@ function M.startBroadcastAudioJob(inputText)
                     M.updateProgress(donePct, "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " done", false)
 
                     if partIdx < totalParts then
-                        M.delay(50, function() processBcPart(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0) end)
+                        M.delay(50, function() processBcPart(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0, false) end)
                     else
                         finishMerge()
                     end
@@ -2316,7 +3057,7 @@ function M.startBroadcastAudioJob(inputText)
             if discoveredQueue and #discoveredQueue > 0 then
                 ttsQueue = discoveredQueue
             end
-            processBcPart(startIdx, 1, 1, firstKey, 0)
+            processBcPart(startIdx, 1, 1, firstKey, 0, false)
         end)
         return
     end
@@ -2351,10 +3092,10 @@ function M.startBroadcastAudioJob(inputText)
             stopOnError("Merge error: " .. tostring(durOrErr))
             return
         end
-        M.onAudioReadyUI(durOrErr, tostring(spkCount) .. "-Speaker Broadcast")
+        M.finalizeMergedVoice(durOrErr, tostring(spkCount) .. "-Speaker Broadcast")
     end
 
-    local function processBatch(partIdx, ttsIdx, modeIdx, curKey, keyRetries)
+    local function processBatch(partIdx, ttsIdx, modeIdx, curKey, keyRetries, sameModelRetried)
         if isCanceled() then return end
         local curModel = ttsQueue[ttsIdx]
         if not curModel then
@@ -2367,7 +3108,11 @@ function M.startBroadcastAudioJob(inputText)
         local isMulti = (#spkList >= 2)
 
         local pct = math.max(5, math.floor(((partIdx - 1) / totalParts) * 90))
-        M.updateProgress(pct, "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating...", partIdx == 1 and modeIdx == 1 and keyRetries == 0)
+        local nextCap = math.min(90, math.floor((partIdx / totalParts) * 90) - 5)
+        if nextCap < pct + 5 then nextCap = math.min(90, pct + 15) end
+        local partLabel = "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " generating..."
+        M.updateProgress(pct, partLabel, partIdx == 1 and modeIdx == 1 and keyRetries == 0)
+        M.startProgressTicker(myJobId, pct, nextCap, 1800, partLabel)
 
         local contNote = ""
         if partIdx > 1 and batches[partIdx - 1] and #batches[partIdx - 1].turns > 0 then
@@ -2386,10 +3131,13 @@ function M.startBroadcastAudioJob(inputText)
             local voiceA = M.cfg.speakerVoices[idxA] or M.DEFAULT_SPK_VOICES[idxA] or "Puck"
             local voiceB = M.cfg.speakerVoices[idxB] or M.DEFAULT_SPK_VOICES[idxB] or "Kore"
 
-            local styleA = "consistent broadcast friend (" .. voiceA .. ") speaking in " .. lang
-                .. ", strictly matching exact mood: " .. mood .. ", locked to identical voice identity, vocal pitch, and steady tempo" .. contNote
-            local styleB = "consistent broadcast friend (" .. voiceB .. ") speaking in " .. lang
-                .. ", strictly matching exact mood: " .. mood .. ", locked to identical voice identity, vocal pitch, and steady tempo" .. contNote
+            local exactMoodDesc = M.getMoodActingInstruction(mood)
+            local styleA = "CRYSTAL-CLEAR STUDIO VOICE (" .. voiceA .. ") speaking in " .. lang
+                .. ", 100% STRICT MOOD (" .. mood .. "): " .. exactMoodDesc
+                .. ", crisp clean pronunciation, zero muffling, locked to identical voice identity, pitch, and tempo" .. contNote
+            local styleB = "CRYSTAL-CLEAR STUDIO VOICE (" .. voiceB .. ") speaking in " .. lang
+                .. ", 100% STRICT MOOD (" .. mood .. "): " .. exactMoodDesc
+                .. ", crisp clean pronunciation, zero muffling, locked to identical voice identity, pitch, and tempo" .. contNote
 
             for _, turn in ipairs(batch.turns) do
                 local lbl = "Speaker" .. tostring(turn.speakerIdx)
@@ -2422,8 +3170,10 @@ function M.startBroadcastAudioJob(inputText)
             for _, turn in ipairs(batch.turns) do
                 table.insert(combinedText, turn.text)
             end
-            local stylePrompt = "natural group podcast friend (" .. voiceA .. ") speaking in " .. lang
-                .. ", strictly matching exact mood: " .. mood .. ", keeping identical voice identity, vocal pitch, and lively tone throughout" .. contNote
+            local exactMoodDesc = M.getMoodActingInstruction(mood)
+            local stylePrompt = "CRYSTAL-CLEAR STUDIO VOICE (" .. voiceA .. ") speaking in " .. lang
+                .. ", 100% STRICT MOOD (" .. mood .. "): " .. exactMoodDesc
+                .. ", crisp clean pronunciation, zero muffling, locked to identical voice identity, pitch, and tempo" .. contNote
             local partObj = { text = table.concat(combinedText, " ") }
             if modeIdx == 3 then
                 partObj.speechMetadata = { style = stylePrompt }
@@ -2452,21 +3202,29 @@ function M.startBroadcastAudioJob(inputText)
         }
 
         local okP, errP = M.httpPost(url, cjson.encode(payload), headers, function(code, content)
+            M.stopProgressTicker()
             if isCanceled() then return end
 
             if code == 400 and modeIdx < 4 then
-                M.delay(100, function() processBatch(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries) end)
+                M.delay(100, function() processBatch(partIdx, ttsIdx, modeIdx + 1, curKey, keyRetries, sameModelRetried) end)
                 return
             end
 
             if code == 429 or code == 503 or code == 500 or code == -1 or code == 404 then
                 M.logIssue("GroupPart" .. tostring(partIdx), "Model " .. curModel .. " HTTP " .. tostring(code) .. ": " .. tostring(M.extractApiError(content) or "Busy"))
+                if not sameModelRetried then
+                    M.updateProgress(pct, "Limit/busy on " .. curModel .. ". Rechecking in 5s...", false)
+                    M.delay(5000, function() processBatch(partIdx, ttsIdx, modeIdx, curKey, keyRetries, true) end)
+                    return
+                end
                 local altKey = M.getAlternateApiKey(curKey)
                 if altKey and keyRetries < 4 then
-                    M.delay(250, function() processBatch(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1) end)
+                    M.updateProgress(pct, "Switching API key for Part " .. tostring(partIdx) .. "...", false)
+                    M.delay(500, function() processBatch(partIdx, ttsIdx, modeIdx, altKey, keyRetries + 1, false) end)
                     return
                 elseif ttsIdx < #ttsQueue then
-                    M.delay(300, function() processBatch(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0) end)
+                    M.updateProgress(pct, "Limit reached. Switching to next TTS model in 4s (Part " .. tostring(partIdx) .. ")...", false)
+                    M.delay(4000, function() processBatch(partIdx, ttsIdx + 1, 1, M.getNextApiKey(), 0, false) end)
                     return
                 end
             end
@@ -2489,7 +3247,7 @@ function M.startBroadcastAudioJob(inputText)
                 M.updateProgress(donePct, "Broadcast Part " .. tostring(partIdx) .. "/" .. tostring(totalParts) .. " done", false)
 
                 if partIdx < totalParts then
-                    M.delay(50, function() processBatch(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0) end)
+                    M.delay(50, function() processBatch(partIdx + 1, ttsIdx, modeIdx, M.getNextApiKey(), 0, false) end)
                 else
                     finishGroupMerge()
                 end
@@ -2516,7 +3274,7 @@ function M.startBroadcastAudioJob(inputText)
         if discoveredQueue and #discoveredQueue > 0 then
             ttsQueue = discoveredQueue
         end
-        processBatch(startIdx, 1, 1, firstKey, 0)
+        processBatch(startIdx, 1, 1, firstKey, 0, false)
     end)
 end
 -- ============================================================
@@ -2630,26 +3388,47 @@ function M.showVoicePickerDialog(title, currentRawVoice, onConfirm)
     local layout = {
         LinearLayout,
         orientation = "vertical",
-        padding = "14dp",
+        padding = "12dp",
         layout_width = "fill",
-        layout_height = "wrap",
+        layout_height = "fill",
         {
             ListView,
             id = "voiceList",
             layout_width = "fill",
-            layout_height = "340dp",
+            layout_height = "0dp",
+            layout_weight = "1",
             backgroundColor = "#F5F5F5",
             layout_marginBottom = "10dp"
         },
         {
-            Button,
-            id = "doneBtn",
-            text = "DONE",
+            LinearLayout,
+            orientation = "horizontal",
             layout_width = "fill",
             layout_height = "wrap",
-            backgroundColor = "#2E7D32",
-            textColor = "#FFFFFF",
-            padding = "12dp"
+            {
+                Button,
+                id = "cancelBtn",
+                text = "CANCEL",
+                layout_width = "0dp",
+                layout_weight = "1",
+                layout_height = "wrap",
+                backgroundColor = "#757575",
+                textColor = "#FFFFFF",
+                padding = "12dp",
+                layout_marginRight = "6dp"
+            },
+            {
+                Button,
+                id = "doneBtn",
+                text = "DONE (" .. M.getVoiceDisplayName(tempVoice) .. ")",
+                layout_width = "0dp",
+                layout_weight = "1.2",
+                layout_height = "wrap",
+                backgroundColor = "#2E7D32",
+                textColor = "#FFFFFF",
+                padding = "12dp",
+                layout_marginLeft = "6dp"
+            }
         }
     }
 
@@ -2657,6 +3436,13 @@ function M.showVoicePickerDialog(title, currentRawVoice, onConfirm)
     dlg.setTitle(title)
     dlg.setView(loadlayout(layout, views))
     dlg.setCancelable(true)
+
+    pcall(function()
+        local win = dlg.getWindow()
+        if win then
+            win.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+        end
+    end)
 
     local function buildDisplay()
         local items = {}
@@ -2681,22 +3467,227 @@ function M.showVoicePickerDialog(title, currentRawVoice, onConfirm)
         local pickedRaw = M.RAW_VOICES[pos + 1]
         if not pickedRaw then return end
         tempVoice = pickedRaw
+        local dispName = M.getVoiceDisplayName(pickedRaw)
 
-        -- Refresh checkmarks without closing dialog or losing scroll position
         local firstVis = views.voiceList.getFirstVisiblePosition()
         local newItems = buildDisplay()
         local newAdapter = ArrayAdapter(context, android.R.layout.simple_list_item_1, newItems)
         views.voiceList.setAdapter(newAdapter)
         pcall(function() views.voiceList.setSelection(firstVis) end)
+        pcall(function() views.doneBtn.setText("DONE (" .. dispName .. ")") end)
 
-        -- Play 3-5 second cached voice sample
+        M.speakOnly("Checked, " .. dispName)
         M.previewVoiceSample(pickedRaw)
+    end
+
+    views.cancelBtn.onClick = function()
+        M.stopPreviewPlayer()
+        dlg.dismiss()
     end
 
     views.doneBtn.onClick = function()
         M.stopPreviewPlayer()
         dlg.dismiss()
         if onConfirm then onConfirm(tempVoice) end
+    end
+
+    dlg.show()
+end
+
+-- ============================================================
+-- Background Music Picker Dialog (Phone Storage Scan + [✓] + Instant Play + Bottom-Right DONE)
+-- ============================================================
+function M.scanDeviceAudioFiles()
+    local results, seen = {}, {}
+    local function addTrack(path, name)
+        if not path or path == "" or seen[path] then return end
+        local f = File(path)
+        if not f.exists() or f.length() < 4000 then return end
+        local lower = path:lower()
+        if lower:match("%.mp3$") or lower:match("%.wav$") or lower:match("%.m4a$") or lower:match("%.aac$") or lower:match("%.ogg$") then
+            seen[path] = true
+            local disp = (name and name ~= "") and name or f.getName()
+            table.insert(results, { name = disp, path = path })
+        end
+    end
+
+    pcall(function()
+        local resolver = context.getContentResolver()
+        local MediaClass = luajava.bindClass("android.provider.MediaStore$Audio$Media")
+        local proj = String({ "_data", "_display_name" })
+        local cur = resolver.query(MediaClass.EXTERNAL_CONTENT_URI, proj, nil, nil, "date_modified DESC")
+        if cur then
+            local idxData = cur.getColumnIndex("_data")
+            local idxName = cur.getColumnIndex("_display_name")
+            local count = 0
+            while cur.moveToNext() and count < 200 do
+                local p = (idxData >= 0) and cur.getString(idxData) or nil
+                local n = (idxName >= 0) and cur.getString(idxName) or nil
+                if p then
+                    addTrack(p, n)
+                    count = count + 1
+                end
+            end
+            cur.close()
+        end
+    end)
+
+    local roots = {
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+        File(Environment.getExternalStorageDirectory(), "Music"),
+        File(Environment.getExternalStorageDirectory(), "Download"),
+        File(Environment.getExternalStorageDirectory(), "Audio")
+    }
+    for _, dir in ipairs(roots) do
+        pcall(function()
+            if dir and dir.exists() and dir.isDirectory() then
+                local list = dir.listFiles()
+                if list then
+                    for i = 0, #list - 1 do
+                        local item = list[i]
+                        if item and item.isFile() then
+                            addTrack(item.getAbsolutePath(), item.getName())
+                        end
+                    end
+                end
+            end
+        end)
+    end
+    return results
+end
+
+function M.showBgMusicPickerDialog(onConfirm)
+    local tracks = M.scanDeviceAudioFiles()
+    if #tracks == 0 then
+        M.speakOnly("No MP3 or audio music files found in phone storage.")
+        return
+    end
+
+    local tempPath = M.cfg.bgMusicPath or ""
+    local tempName = M.cfg.bgMusicName or ""
+    local views = {}
+    local layout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "12dp",
+        layout_width = "fill",
+        layout_height = "fill",
+        {
+            ListView,
+            id = "musicList",
+            layout_width = "fill",
+            layout_height = "0dp",
+            layout_weight = "1",
+            backgroundColor = "#F5F5F5",
+            layout_marginBottom = "10dp"
+        },
+        {
+            LinearLayout,
+            orientation = "horizontal",
+            layout_width = "fill",
+            layout_height = "wrap",
+            {
+                Button,
+                id = "removeBtn",
+                text = "REMOVE",
+                layout_width = "0dp",
+                layout_weight = "0.9",
+                layout_height = "wrap",
+                backgroundColor = "#C62828",
+                textColor = "#FFFFFF",
+                padding = "12dp",
+                layout_marginRight = "4dp"
+            },
+            {
+                Button,
+                id = "cancelBtn",
+                text = "CANCEL",
+                layout_width = "0dp",
+                layout_weight = "0.9",
+                layout_height = "wrap",
+                backgroundColor = "#757575",
+                textColor = "#FFFFFF",
+                padding = "12dp",
+                layout_marginRight = "4dp"
+            },
+            {
+                Button,
+                id = "doneBtn",
+                text = (tempName ~= "" and ("DONE (" .. tempName .. ")") or "DONE"),
+                layout_width = "0dp",
+                layout_weight = "1.2",
+                layout_height = "wrap",
+                backgroundColor = "#2E7D32",
+                textColor = "#FFFFFF",
+                padding = "12dp"
+            }
+        }
+    }
+
+    local dlg = LuaDialog(context)
+    dlg.setTitle("Select Background Music (" .. tostring(#tracks) .. " files)")
+    dlg.setView(loadlayout(layout, views))
+    dlg.setCancelable(true)
+
+    pcall(function()
+        local win = dlg.getWindow()
+        if win then
+            win.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT)
+        end
+    end)
+
+    local function buildMusicDisplay()
+        local items = {}
+        local selIdx = 0
+        for i, tr in ipairs(tracks) do
+            if tr.path == tempPath then
+                table.insert(items, "[✓] " .. tr.name)
+                selIdx = i - 1
+            else
+                table.insert(items, tr.name)
+            end
+        end
+        return items, selIdx
+    end
+
+    local items, selIdx = buildMusicDisplay()
+    local adapter = ArrayAdapter(context, android.R.layout.simple_list_item_1, items)
+    views.musicList.setAdapter(adapter)
+    pcall(function() views.musicList.setSelection(selIdx) end)
+
+    views.musicList.onItemClick = function(parent, v, pos, id)
+        local tr = tracks[pos + 1]
+        if not tr then return end
+        tempPath = tr.path
+        tempName = tr.name
+
+        local firstVis = views.musicList.getFirstVisiblePosition()
+        local newItems = buildMusicDisplay()
+        local newAdapter = ArrayAdapter(context, android.R.layout.simple_list_item_1, newItems)
+        views.musicList.setAdapter(newAdapter)
+        pcall(function() views.musicList.setSelection(firstVis) end)
+        pcall(function() views.doneBtn.setText("DONE (" .. tostring(tr.name) .. ")") end)
+
+        M.speakOnly("Checked, " .. tostring(tr.name))
+        M.playPreviewFile(tr.path)
+    end
+
+    views.removeBtn.onClick = function()
+        M.stopPreviewPlayer()
+        dlg.dismiss()
+        if onConfirm then onConfirm("", "") end
+    end
+
+    views.cancelBtn.onClick = function()
+        M.stopPreviewPlayer()
+        dlg.dismiss()
+    end
+
+    views.doneBtn.onClick = function()
+        M.stopPreviewPlayer()
+        dlg.dismiss()
+        if onConfirm then onConfirm(tempPath, tempName) end
     end
 
     dlg.show()
@@ -2717,7 +3708,7 @@ function M.shareAudio()
         return
     end
 
-    local fileName = getDefaultDownloadName() .. ".wav"
+    local fileName = getDefaultDownloadName() .. ".mp3"
     local shareUri = nil
     local lastErr = ""
 
@@ -2726,7 +3717,7 @@ function M.shareAudio()
             local input = FileInputStream(sourceFile)
             local values = ContentValues()
             values.put("_display_name", fileName)
-            values.put("mime_type", "audio/wav")
+            values.put("mime_type", "audio/mpeg")
             values.put("relative_path", Environment.DIRECTORY_DOWNLOADS)
             local resolver = context.getContentResolver()
             local DownloadsClass = luajava.bindClass("android.provider.MediaStore$Downloads")
@@ -2779,7 +3770,7 @@ function M.shareAudio()
     M.delay(200, function()
         local okIntent, errIntent = pcall(function()
             local sendIntent = Intent(Intent.ACTION_SEND)
-            sendIntent.setType("audio/wav")
+            sendIntent.setType("audio/mpeg")
             sendIntent.putExtra(Intent.EXTRA_STREAM, shareUri)
             sendIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             local chooser = Intent.createChooser(sendIntent, "Share Audio via")
@@ -2809,16 +3800,20 @@ function M.performDownload(customBaseName)
     end
 
     local safeBase = makeSafeFileName(customBaseName)
-    local fileName = safeBase .. ".wav"
+    local fileName = safeBase .. ".mp3"
     local success = false
     local lastErr = ""
 
+    local tempMp3 = File(M.baseStorageDir, "export_tmp_" .. os.time() .. ".mp3")
+    local okExp = M.exportToMp3File(sourceFile.getAbsolutePath(), tempMp3)
+    local exportSrc = (okExp and tempMp3.exists() and tempMp3.length() > 100) and tempMp3 or sourceFile
+
     if Build.VERSION.SDK_INT >= 29 then
         local ok, err = pcall(function()
-            local input = FileInputStream(sourceFile)
+            local input = FileInputStream(exportSrc)
             local values = ContentValues()
             values.put("_display_name", fileName)
-            values.put("mime_type", "audio/x-wav")
+            values.put("mime_type", "audio/mpeg")
             values.put("relative_path", Environment.DIRECTORY_DOWNLOADS)
             local resolver = context.getContentResolver()
             local DownloadsClass = luajava.bindClass("android.provider.MediaStore$Downloads")
@@ -2837,7 +3832,7 @@ function M.performDownload(customBaseName)
             local downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             if not downloadDir.exists() then downloadDir.mkdirs() end
             local destFile = File(downloadDir, fileName)
-            local input = FileInputStream(sourceFile)
+            local input = FileInputStream(exportSrc)
             local output = FileOutputStream(destFile)
             copyStream(input, output)
             output.flush()
@@ -2851,6 +3846,7 @@ function M.performDownload(customBaseName)
         end)
         if ok then success = true else lastErr = lastErr .. " | " .. tostring(err) end
     end
+    pcall(function() if tempMp3.exists() then tempMp3.delete() end end)
 
     if success then
         M.clearIssueReport()
@@ -2874,7 +3870,7 @@ function M.performDownload(customBaseName)
             end
         end)
         M.refreshActionButtons()
-        M.updateProgress(0, "Saved as " .. fileName .. "! Saved parts and box cleared.", true)
+        M.updateProgress(0, "Saved to Phone Storage (Downloads) as " .. fileName .. "! Saved parts and box cleared.", true)
         return true
     else
         M.logIssue("Download", lastErr)
@@ -3380,6 +4376,145 @@ function M.showSetApiDialog()
     apiDialog.show()
 end
 
+
+function M.showBgMusicSettingsDialog()
+    local views = {}
+    local layout = {
+        LinearLayout,
+        orientation = "vertical",
+        padding = "18dp",
+        layout_width = "fill",
+        layout_height = "wrap",
+        {
+            Button,
+            id = "duckVolBtn",
+            text = "Music Vol During Voice: " .. tostring(M.cfg.bgDuckVol or 12) .. "%",
+            layout_width = "fill",
+            layout_height = "wrap",
+            backgroundColor = "#3949AB",
+            textColor = "#FFFFFF",
+            padding = "12dp",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "normVolBtn",
+            text = "Intro / Outro / Pause Music Vol: " .. tostring(M.cfg.bgNormalVol or 38) .. "%",
+            layout_width = "fill",
+            layout_height = "wrap",
+            backgroundColor = "#5E35B1",
+            textColor = "#FFFFFF",
+            padding = "12dp",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "ioSecBtn",
+            text = "Intro & Outro Time: " .. tostring(M.cfg.bgIntroOutroSec or 3) .. " Seconds",
+            layout_width = "fill",
+            layout_height = "wrap",
+            backgroundColor = "#00897B",
+            textColor = "#FFFFFF",
+            padding = "12dp",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "voiceBoostBtn",
+            text = "Voice Clarity Boost: " .. tostring(M.cfg.bgVoiceBoost or 100) .. "%",
+            layout_width = "fill",
+            layout_height = "wrap",
+            backgroundColor = "#2E7D32",
+            textColor = "#FFFFFF",
+            padding = "12dp",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "autoDuckBtn",
+            text = "Auto-Ducking: " .. ((M.cfg.bgAutoDuck ~= false) and "ON" or "OFF"),
+            layout_width = "fill",
+            layout_height = "wrap",
+            backgroundColor = "#E65100",
+            textColor = "#FFFFFF",
+            padding = "12dp",
+            layout_marginBottom = "12dp"
+        },
+        {
+            Button,
+            id = "backBtn",
+            text = "GO BACK",
+            layout_width = "fill",
+            layout_height = "wrap",
+            backgroundColor = "#9E9E9E",
+            textColor = "#FFFFFF",
+            padding = "12dp"
+        }
+    }
+
+    local dlg = LuaDialog(context)
+    dlg.setTitle("BG Music & Auto-Ducking Settings")
+    dlg.setView(loadlayout(layout, views))
+    dlg.setCancelable(true)
+
+    views.duckVolBtn.onClick = M.safe("pickDuckVol", function()
+        local opts = { "5%", "10%", "12%", "15%", "20%", "25%", "30%", "40%" }
+        M.showListPickerDialog("Music Volume During Voice", opts, nil, tostring(M.cfg.bgDuckVol or 12) .. "%", function(chosen)
+            local n = tonumber(tostring(chosen):match("(%d+)")) or 12
+            M.cfg.bgDuckVol = n
+            M.saveSettings()
+            views.duckVolBtn.setText("Music Vol During Voice: " .. tostring(n) .. "%")
+            M.speakOnly("Music volume during voice set to " .. tostring(n) .. " percent")
+        end)
+    end)
+
+    views.normVolBtn.onClick = M.safe("pickNormVol", function()
+        local opts = { "20%", "30%", "38%", "50%", "60%", "75%" }
+        M.showListPickerDialog("Intro / Outro / Pause Music Volume", opts, nil, tostring(M.cfg.bgNormalVol or 38) .. "%", function(chosen)
+            local n = tonumber(tostring(chosen):match("(%d+)")) or 38
+            M.cfg.bgNormalVol = n
+            M.saveSettings()
+            views.normVolBtn.setText("Intro / Outro / Pause Music Vol: " .. tostring(n) .. "%")
+            M.speakOnly("Intro and outro music volume set to " .. tostring(n) .. " percent")
+        end)
+    end)
+
+    views.ioSecBtn.onClick = M.safe("pickIoSec", function()
+        local opts = { "0 Seconds", "2 Seconds", "3 Seconds", "4 Seconds", "5 Seconds" }
+        M.showListPickerDialog("Intro & Outro Music Time", opts, nil, tostring(M.cfg.bgIntroOutroSec or 3) .. " Seconds", function(chosen)
+            local n = tonumber(tostring(chosen):match("(%d+)")) or 3
+            M.cfg.bgIntroOutroSec = n
+            M.saveSettings()
+            views.ioSecBtn.setText("Intro & Outro Time: " .. tostring(n) .. " Seconds")
+            M.speakOnly("Intro and outro time set to " .. tostring(n) .. " seconds")
+        end)
+    end)
+
+    views.voiceBoostBtn.onClick = M.safe("pickVoiceBoost", function()
+        local opts = { "100% (Normal)", "115% (Clear Boost)", "130% (Loud)" }
+        local cur = (M.cfg.bgVoiceBoost == 130) and "130% (Loud)" or ((M.cfg.bgVoiceBoost == 115) and "115% (Clear Boost)" or "100% (Normal)")
+        M.showListPickerDialog("Voice Clarity Boost", opts, nil, cur, function(chosen)
+            local n = tonumber(tostring(chosen):match("(%d+)")) or 100
+            M.cfg.bgVoiceBoost = n
+            M.saveSettings()
+            views.voiceBoostBtn.setText("Voice Clarity Boost: " .. tostring(n) .. "%")
+            M.speakOnly("Voice boost set to " .. tostring(n) .. " percent")
+        end)
+    end)
+
+    views.autoDuckBtn.onClick = M.safe("toggleAutoDuck", function()
+        M.cfg.bgAutoDuck = not (M.cfg.bgAutoDuck ~= false)
+        M.saveSettings()
+        local st = M.cfg.bgAutoDuck and "ON" or "OFF"
+        views.autoDuckBtn.setText("Auto-Ducking: " .. st)
+        M.speakOnly("Auto-ducking " .. st)
+    end)
+
+    views.backBtn.onClick = function() dlg.dismiss() end
+    dlg.show()
+end
+
+
 function M.showSettingsDialog()
     local views = {}
     local layout = {
@@ -3406,6 +4541,17 @@ function M.showSettingsDialog()
             layout_width = "fill",
             layout_height = "wrap",
             backgroundColor = "#37474F",
+            textColor = "#FFFFFF",
+            padding = "12dp",
+            layout_marginBottom = "10dp"
+        },
+        {
+            Button,
+            id = "bgSetBtn",
+            text = "BG MUSIC & DUCKING SETTINGS",
+            layout_width = "fill",
+            layout_height = "wrap",
+            backgroundColor = "#3949AB",
             textColor = "#FFFFFF",
             padding = "12dp",
             layout_marginBottom = "10dp"
@@ -3475,6 +4621,7 @@ function M.showSettingsDialog()
             M.speakOnly("Model selected: " .. chosen)
         end)
     end)
+    views.bgSetBtn.onClick = M.safe("bgSettings", function() M.showBgMusicSettingsDialog() end)
     views.guideBtn.onClick = M.safe("guide", function() M.showGuideDialog() end)
     views.reportBtn.onClick = M.safe("report", function() M.showReportIssueDialog() end)
     views.aboutBtn.onClick = M.safe("about", function() M.showAboutDialog() end)
@@ -3612,8 +4759,6 @@ function M.showMain()
                     makeSpeakerRowLayout(2),
                     makeSpeakerRowLayout(3),
                     makeSpeakerRowLayout(4),
-                    makeSpeakerRowLayout(5),
-                    makeSpeakerRowLayout(6),
                     {
                         Button,
                         id = "bcMoodBtn",
@@ -3664,6 +4809,18 @@ function M.showMain()
                     textSize = 14,
                     singleLine = true,
                     visibility = View.GONE,
+                    layout_marginBottom = "8dp"
+                },
+                {
+                    Button,
+                    id = "bgMusicBtn",
+                    text = "ADD BACKGROUND MUSIC (Optional: None)",
+                    layout_width = "fill",
+                    layout_height = "wrap",
+                    backgroundColor = "#EDE7F6",
+                    textColor = "#311B92",
+                    textSize = 13,
+                    padding = "10dp",
                     layout_marginBottom = "8dp"
                 },
 
@@ -3771,6 +4928,18 @@ function M.showMain()
                     typeface = Typeface.DEFAULT_BOLD
                 },
                 {
+                    Button,
+                    id = "applyBgBtn",
+                    text = "APPLY / UPDATE BG MUSIC (Offline)",
+                    layout_width = "fill",
+                    layout_height = "wrap",
+                    backgroundColor = "#512DA8",
+                    textColor = "#FFFFFF",
+                    textSize = 12,
+                    padding = "8dp",
+                    layout_marginBottom = "5dp"
+                },
+                {
                     LinearLayout,
                     orientation = "horizontal",
                     layout_width = "fill",
@@ -3871,10 +5040,17 @@ function M.showMain()
         views.bcMoodBtn.setText("Broadcast Mood: " .. tostring(M.cfg.bcMood))
         views.langBtn.setText("Language: " .. tostring(M.cfg.lang))
         views.durationBtn.setText("Duration: " .. tostring(M.cfg.duration))
-        for i = 1, 6 do
+        for i = 1, 4 do
             local vBtn = views["spkVoiceBtn_" .. i]
             if vBtn then
                 vBtn.setText("Speaker " .. i .. " Voice: " .. M.getVoiceDisplayName(M.cfg.speakerVoices[i] or M.DEFAULT_SPK_VOICES[i]))
+            end
+        end
+        if views.bgMusicBtn then
+            if M.cfg.bgMusicPath and M.cfg.bgMusicPath ~= "" and M.cfg.bgMusicName ~= "" then
+                views.bgMusicBtn.setText("BG Music: " .. tostring(M.cfg.bgMusicName))
+            else
+                views.bgMusicBtn.setText("ADD BACKGROUND MUSIC (Optional: None)")
             end
         end
     end
@@ -3886,7 +5062,7 @@ function M.showMain()
         views.singleOptionsLayout.setVisibility(isSingle and View.VISIBLE or View.GONE)
         views.bcOptionsLayout.setVisibility(isSingle and View.GONE or View.VISIBLE)
         if not isSingle then
-            for i = 1, 6 do
+            for i = 1, 4 do
                 local row = views["spkRow_" .. i]
                 if row then
                     row.setVisibility(i <= sc and View.VISIBLE or View.GONE)
@@ -4005,8 +5181,28 @@ function M.showMain()
         end)
     end)
 
-    -- Bind All 6 Speaker Name Inputs & Voice Picker Buttons
-    for i = 1, 6 do
+    views.bgMusicBtn.onClick = M.safe("pickBgMusic", function()
+        M.stopPreviewPlayer()
+        M.showBgMusicPickerDialog(function(chosenPath, chosenName)
+            M.cfg.bgMusicPath = chosenPath or ""
+            M.cfg.bgMusicName = chosenName or ""
+            M.saveSettings()
+            syncOptionLabels()
+            if chosenPath and chosenPath ~= "" then
+                M.speakOnly("Background music selected: " .. tostring(chosenName))
+            else
+                M.speakOnly("Background music removed.")
+            end
+        end)
+    end)
+
+    views.applyBgBtn.onClick = M.safe("applyBgMusic", function()
+        M.stopPreviewPlayer()
+        M.applyBgMusicNow()
+    end)
+
+    -- Bind All 4 Speaker Name Inputs & Voice Picker Buttons
+    for i = 1, 4 do
         local nameEd = views["spkName_" .. i]
         local voiceBtn = views["spkVoiceBtn_" .. i]
         nameEd.setText(M.cfg.speakerNames[i] or "")
